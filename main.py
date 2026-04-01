@@ -3,7 +3,7 @@ import json
 import jwt
 from datetime import datetime, timedelta
 from typing import List, Optional
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, UniqueConstraint, and_, select
+from sqlalchemy import Date, DateTime, create_engine, Column, Integer, String, Float, Boolean, ForeignKey, UniqueConstraint, and_, select
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -36,33 +36,56 @@ class Project(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
     domain = Column(String)
+    site_url = Column(String)        # url du site
+    gsc_property = Column(String)    # propriété GSC (sc-domain:example.com)
     country = Column(String)
     language = Column(String)
+    branded_keywords = Column(String)   # mots clés de marque
+    default_days_back = Column(Integer, default=7)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
     userId = Column(Integer, ForeignKey("users.id"), index=True)
 
 class GSCDaily(Base):
     __tablename__ = "gsc_daily"
     id = Column(Integer, primary_key=True, index=True)
-    projectId = Column(Integer, ForeignKey("projects.id"))
-    keyword = Column(String)
-    date = Column(String)
+    projectId = Column(Integer, ForeignKey("projects.id"), index=True)
+    keyword = Column(String, index=True)
+    page = Column(String)  # <-- important
+    date = Column(Date, index=True)
     impressions = Column(Integer)
     clicks = Column(Integer)
     position = Column(Float)
     ctr = Column(Float)
-    __table_args__ = (UniqueConstraint('projectId', 'keyword', 'date', name='_gsc_project_keyword_date_uc'),)
+    __table_args__ = (
+        UniqueConstraint('projectId', 'keyword', 'page', 'date', name='_gsc_project_keyword_page_date_uc'),
+    )
 
 class SERPDaily(Base):
     __tablename__ = "serp_daily"
+    __table_args__ = (
+        UniqueConstraint("projectid", "keyword", "date", name="serp_daily_project_keyword_date_key"),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
-    projectId = Column(Integer, ForeignKey("projects.id"))
-    keyword = Column(String)
-    date = Column(String)
+    projectid = Column(Integer, ForeignKey("projects.id"), index=True)
+    keyword = Column(String, index=True)
+    date = Column(String, index=True)  # TEXT in server.ts
     position = Column(Integer)
     competition = Column(Float)
     volume = Column(Integer)
     cpc = Column(Float)
-    __table_args__ = (UniqueConstraint('projectId', 'keyword', 'date', name='_serp_project_keyword_date_uc'),)
+    serp_result_count = Column(Integer, default=0)
+    serp_top1_title = Column(String)
+    serp_top1_link = Column(String)
+    serp_top3_links = Column(String)
+    serp_top3_domains = Column(String)
+    paa_count = Column(Integer, default=0)
+    paa_questions_newline = Column(String)
+    ai_overview_present = Column(Boolean, default=False)
+    ai_overview_text = Column(String)
+    top_organic_urls = Column(String)
 
 class ScoresDaily(Base):
     __tablename__ = "scores_daily"
@@ -104,15 +127,6 @@ class KeywordCluster(Base):
     priority = Column(String)
     created_at = Column(String, default=lambda: datetime.now().isoformat())
 
-class Connector(Base):
-    __tablename__ = "connectors"
-    id = Column(Integer, primary_key=True, index=True)
-    projectId = Column(Integer, ForeignKey("projects.id"))
-    type = Column(String)  # 'GSC', 'SEMrush', 'GoogleSheets'
-    config = Column(String)  # JSON string
-    status = Column(String)
-    last_sync = Column(String)
-
 class CalendarEvent(Base):
     __tablename__ = "events"
     id = Column(Integer, primary_key=True, index=True)
@@ -133,7 +147,7 @@ def init_db():
     seed_user()
     print("Database initialized successfully")
 
-def seed_user():
+def seed_user():  # Crée un utilisateur admin par défaut s'il n'existe pas
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.email == "admin@example.com").first()
@@ -160,7 +174,7 @@ def ingest_gsc(project_id: int, data: List[dict]):
                 ctr=item['ctr']
             )
             stmt = stmt.on_conflict_do_update(
-                constraint='_gsc_project_keyword_date_uc',
+                constraint='_gsc_project_keyword_page_date_uc',
                 set_={
                     "impressions": stmt.excluded.impressions,
                     "clicks": stmt.excluded.clicks,
@@ -180,20 +194,40 @@ def ingest_serp(project_id: int, data: List[dict]):
         for item in data:
             stmt = pg_insert(SERPDaily).values(
                 projectId=project_id,
-                keyword=item['keyword'],
-                date=item['date'],
-                position=item['position'],
-                competition=item['competition'],
-                volume=item.get('volume', 0),
-                cpc=item.get('cpc', 0.0)
+                keyword=item["keyword"],
+                date=item["date"],
+                position=item.get("position", 0),
+                competition=item.get("competition", 0),
+                volume=item.get("volume", 0),
+                cpc=item.get("cpc", 0.0),
+                serp_result_count=item.get("serp_result_count", 0),
+                serp_top1_title=item.get("serp_top1_title", ""),
+                serp_top1_link=item.get("serp_top1_link", ""),
+                serp_top3_links=item.get("serp_top3_links", ""),
+                serp_top3_domains=item.get("serp_top3_domains", ""),
+                paa_count=item.get("paa_count", 0),
+                paa_questions_newline=item.get("paa_questions_newline", ""),
+                ai_overview_present=item.get("ai_overview_present", False),
+                ai_overview_text=item.get("ai_overview_text", ""),
+                top_organic_urls=item.get("top_organic_urls", ""),
             )
             stmt = stmt.on_conflict_do_update(
-                constraint='_serp_project_keyword_date_uc',
+                constraint="serp_daily_unique",
                 set_={
                     "position": stmt.excluded.position,
                     "competition": stmt.excluded.competition,
                     "volume": stmt.excluded.volume,
-                    "cpc": stmt.excluded.cpc
+                    "cpc": stmt.excluded.cpc,
+                    "serp_result_count": stmt.excluded.serp_result_count,
+                    "serp_top1_title": stmt.excluded.serp_top1_title,
+                    "serp_top1_link": stmt.excluded.serp_top1_link,
+                    "serp_top3_links": stmt.excluded.serp_top3_links,
+                    "serp_top3_domains": stmt.excluded.serp_top3_domains,
+                    "paa_count": stmt.excluded.paa_count,
+                    "paa_questions_newline": stmt.excluded.paa_questions_newline,
+                    "ai_overview_present": stmt.excluded.ai_overview_present,
+                    "ai_overview_text": stmt.excluded.ai_overview_text,
+                    "top_organic_urls": stmt.excluded.top_organic_urls,
                 }
             )
             db.execute(stmt)

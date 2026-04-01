@@ -39,26 +39,50 @@ export default function Tracking() {
   }, [selectedProjectId]);
 
   const fetchProjects = async () => {
+  try {
     const res = await fetch("/api/projects", {
       headers: { Authorization: `Bearer ${localStorage.getItem("token")}` }
     });
-    const data = await res.json();
-    setProjects(data);
-  };
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const json = await res.json();
+    setProjects(Array.isArray(json) ? json : []);
+  } catch (error) {
+    console.error("Tracking fetchProjects error:", error);
+    setProjects([]);
+  }
+};
 
   const fetchData = async () => {
-    setLoading(true);
-    const url = selectedProjectId 
+  setLoading(true);
+
+  try {
+    const url = selectedProjectId
       ? `/api/dashboard?projectId=${selectedProjectId}`
       : "/api/dashboard";
+
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${localStorage.getItem("token")}` }
     });
-    const keywords = await res.json();
-    setData(keywords);
-    setLoading(false);
-  };
 
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const json = await res.json();
+
+    // /api/dashboard renvoie un objet, pas un tableau
+    setData(Array.isArray(json.keywords) ? json.keywords : []);
+  } catch (error) {
+    console.error("Tracking fetchData error:", error);
+    setData([]);
+  } finally {
+    setLoading(false);
+  }
+};
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'Stable': return <span className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 text-emerald-600 rounded-lg text-[10px] font-bold uppercase tracking-wider"><CheckCircle2 className="w-3 h-3" /> Stable</span>;
@@ -125,9 +149,9 @@ export default function Tracking() {
             <tbody className="divide-y divide-slate-50">
               {loading ? (
                 <tr><td colSpan={7} className="px-8 py-10 text-center text-slate-400">Chargement...</td></tr>
-              ) : data.map((k) => {
-                const diff = k.prev_position - k.position;
-                const ctrDiff = k.ctr - k.prev_ctr;
+                            ) : Array.isArray(data) && data.length > 0 ? data.map((k) => {
+                const diff = Number(k.prev_position ?? 0) - Number(k.position ?? 0);
+                const ctrDiff = Number(k.ctr ?? 0) - Number(k.prev_ctr ?? 0);
                 return (
                   <tr key={k.id} className="hover:bg-slate-50/50 transition-colors group">
                     <td className="px-8 py-5">
@@ -147,14 +171,14 @@ export default function Tracking() {
                       </div>
                     </td>
                     <td className="px-8 py-5">
-                      <div className="text-sm font-bold text-slate-900">{(k.ctr * 100).toFixed(1)}%</div>
+                      <div className="text-sm font-bold text-slate-900">{(Number(k.ctr ?? 0) * 100).toFixed(1)}%</div>
                       <div className={`text-[10px] font-bold ${ctrDiff > 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                         {ctrDiff > 0 ? '+' : ''}{(ctrDiff * 100).toFixed(1)}%
                       </div>
                     </td>
                     <td className="px-8 py-5">
                       <div className="w-32 h-2 bg-slate-100 rounded-full overflow-hidden">
-                        <div 
+                        <div
                           className={`h-full rounded-full ${Math.abs(diff) > 5 ? 'bg-red-500' : 'bg-indigo-500'}`}
                           style={{ width: `${Math.min(100, Math.abs(diff) * 10)}%` }}
                         />
@@ -170,8 +194,14 @@ export default function Tracking() {
                     </td>
                   </tr>
                 );
-              })}
-            </tbody>
+              }) : (
+                <tr>
+                  <td colSpan={7} className="px-8 py-10 text-center text-slate-400">
+                    Aucune donnée disponible.
+                  </td>
+                </tr>
+              )}
+                        </tbody>
           </table>
         </div>
       </div>
