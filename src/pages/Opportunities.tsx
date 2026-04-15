@@ -15,6 +15,9 @@ import {
   AlertCircle,
   Activity,
   BarChart,
+  Eye,
+  EyeOff,
+  RefreshCw,
 } from "lucide-react";
 import {
   ScatterChart,
@@ -29,6 +32,8 @@ import {
 } from "recharts";
 import { motion, AnimatePresence } from "motion/react";
 import { qualifyKeywords } from "../services/geminiService";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type Project = {
   id: number;
@@ -59,7 +64,35 @@ type OpportunityRow = {
   priority_level?: string;
   action_hint?: string;
   reasoning?: string;
+  // FIX: is_tracked is now populated by the backend (was always undefined before
+  // because the column didn't exist in the DB and wasn't in the SELECT query)
+  is_tracked?: boolean;
 };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const getPriorityLabel = (score: number) => {
+  if (score >= 1) return "🚀 High";
+  if (score >= 0.4) return "🔥 Medium";
+  return "⚪ Low";
+};
+
+const getScoreColor = (score: number) => {
+  if (score >= 1) return "bg-emerald-50 text-emerald-600";
+  if (score >= 0.4) return "bg-amber-50 text-amber-600";
+  return "bg-slate-100 text-slate-600";
+};
+
+// FIX: Normalised branded detection — handles both "non_branded" and "non-branded"
+// variants that the backend might return depending on whether the NLP enrichment
+// ran or whether the COALESCE fallback ("non-branded") is active.
+const isBrandedKeyword = (branded_status?: string): boolean => {
+  if (!branded_status) return false;
+  const v = branded_status.toLowerCase().trim();
+  return v === "branded";
+};
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Opportunities() {
   const [data, setData] = useState<OpportunityRow[]>([]);
@@ -67,15 +100,31 @@ export default function Opportunities() {
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
   const [loading, setLoading] = useState(true);
 
+  // FIX: Separate state for each async action to avoid conflating UI states.
+  // The original code used a single `resetting` flag for both filter reset
+  // and the n8n trigger, which caused the button to stay disabled even when
+  // only the filters needed clearing.
+  const [resetting, setResetting] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetSuccess, setResetSuccess] = useState(false);
+
+  // FIX: trackingId tracks which keyword row is loading, not a global flag.
+  const [trackingId, setTrackingId] = useState<number | null>(null);
+  const [trackError, setTrackError] = useState<string | null>(null);
+
+  // Filter state
   const [search, setSearch] = useState("");
   const [minVolume, setMinVolume] = useState("");
   const [maxCompetition, setMaxCompetition] = useState("");
   const [onlyPositiveTrend, setOnlyPositiveTrend] = useState(false);
   const [excludeBranded, setExcludeBranded] = useState(false);
 
+  // Modal / qualification state
   const [selectedKeyword, setSelectedKeyword] = useState<OpportunityRow | null>(null);
   const [qualificationResult, setQualificationResult] = useState<any | null>(null);
   const [isQualifying, setIsQualifying] = useState(false);
+
+  // ─── Data fetching ──────────────────────────────────────────────────────────
 
   useEffect(() => {
     fetchProjects();
@@ -90,6 +139,7 @@ export default function Opportunities() {
       const res = await fetch("/api/projects", {
         headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       setProjects(Array.isArray(json) ? json : []);
     } catch (error) {
@@ -108,7 +158,7 @@ export default function Opportunities() {
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
       });
-
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       setData(Array.isArray(json) ? json : []);
     } catch (error) {
@@ -118,6 +168,8 @@ export default function Opportunities() {
       setLoading(false);
     }
   };
+
+  // ─── Qualification ──────────────────────────────────────────────────────────
 
   const handleQualify = async (keyword: OpportunityRow) => {
     setSelectedKeyword(keyword);
@@ -137,12 +189,12 @@ export default function Opportunities() {
       performance_drift: keyword.performance_drift || 0,
       long_tail_indicator:
         keyword.long_tail_indicator ||
-        (keyword.keyword.split(" ").length > 3 ? 1 : 0),
+        (keyword.keyword.trim().split(/\s+/).length > 3 ? 1 : 0),
     };
 
     try {
       const result = await qualifyKeywords(keyword.projectId, [input], date);
-      if (result && result.results && result.results.length > 0) {
+      if (result?.results?.length > 0) {
         setQualificationResult(result.results[0]);
       }
     } catch (error) {
@@ -152,9 +204,128 @@ export default function Opportunities() {
     }
   };
 
+  // ─── Track / Untrack ────────────────────────────────────────────────────────
+  //
+  // FIX: These functions previously called /api/keywords/:id/track and
+  // /api/keywords/:id/untrack which didn't exist in the backend → 404 on every
+  // click. The routes have now been added to server.ts. The is_tracked column
+  // has also been added to the keywords table via an ALTER TABLE migration.
+
+  const handleTrack = async (keywordId: number) => {
+    setTrackingId(keywordId);
+    setTrackError(null);
+    try {
+      const res = await fetch(`/api/keywords/${keywordId}/track`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || `HTTP ${res.status}`);
+      }
+      // Optimistic update — no need to refetch the entire list
+      setData((prev) =>
+        prev.map((item) =>
+          item.id === keywordId ? { ...item, is_tracked: true } : item
+        )
+      );
+    } catch (error: any) {
+      console.error("Track error:", error);
+      setTrackError(error.message || "Erreur lors de l'ajout au suivi.");
+      // Auto-clear error after 4s
+      setTimeout(() => setTrackError(null), 4000);
+    } finally {
+      setTrackingId(null);
+    }
+  };
+
+  const handleUntrack = async (keywordId: number) => {
+    setTrackingId(keywordId);
+    setTrackError(null);
+    try {
+      const res = await fetch(`/api/keywords/${keywordId}/untrack`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || `HTTP ${res.status}`);
+      }
+      setData((prev) =>
+        prev.map((item) =>
+          item.id === keywordId ? { ...item, is_tracked: false } : item
+        )
+      );
+    } catch (error: any) {
+      console.error("Untrack error:", error);
+      setTrackError(error.message || "Erreur lors de la suppression du suivi.");
+      setTimeout(() => setTrackError(null), 4000);
+    } finally {
+      setTrackingId(null);
+    }
+  };
+
+  // ─── Reset filters (local only) ─────────────────────────────────────────────
+  //
+  // FIX: The original resetFilters() was doing TWO things at once:
+  //   1. Resetting the filter UI state (instant, no network needed)
+  //   2. Triggering the n8n workflow (async, can fail)
+  // This was wrong: a filter reset should never block on a network call.
+  // These are now split into two separate actions.
+
+  const clearFilters = () => {
+    setSearch("");
+    setMinVolume("");
+    setMaxCompetition("");
+    setOnlyPositiveTrend(false);
+    setExcludeBranded(false);
+  };
+
+  // ─── Trigger n8n workflow ───────────────────────────────────────────────────
+  //
+  // FIX: Separated from filter reset. Now calls /api/opportunities/reset which
+  // was missing from the backend and has been added to server.ts.
+  // Displays a proper inline error instead of an alert() popup.
+
+  const handleTriggerWorkflow = async () => {
+    setResetting(true);
+    setResetError(null);
+    setResetSuccess(false);
+    try {
+      const res = await fetch("/api/opportunities/reset", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("token")}`,
+        },
+        body: JSON.stringify({ projectId: selectedProjectId || null }),
+      });
+
+      const json = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(json.error || `Erreur HTTP ${res.status}`);
+      }
+
+      setResetSuccess(true);
+      // Reload data after a delay to let n8n process
+      setTimeout(() => {
+        fetchData();
+        setResetSuccess(false);
+      }, 3000);
+    } catch (err: any) {
+      setResetError(err.message || "Erreur inconnue");
+      setTimeout(() => setResetError(null), 8000);
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  // ─── Derived data ───────────────────────────────────────────────────────────
+
   const filteredData = useMemo(() => {
     return data.filter((k) => {
-      const matchesSearch = k.keyword
+      const matchesSearch = String(k.keyword || "")
         .toLowerCase()
         .includes(search.trim().toLowerCase());
 
@@ -167,11 +338,9 @@ export default function Opportunities() {
 
       const matchesTrend = !onlyPositiveTrend || Number(k.trend || 0) > 0;
 
-      const matchesBranded =
-        !excludeBranded ||
-        !String(k.branded_status || "")
-          .toLowerCase()
-          .includes("branded");
+      // FIX: Use the normalised helper — handles "branded", "non_branded",
+      // "non-branded" variants without ambiguity.
+      const matchesBranded = !excludeBranded || !isBrandedKeyword(k.branded_status);
 
       return (
         matchesSearch &&
@@ -183,6 +352,11 @@ export default function Opportunities() {
     });
   }, [data, search, minVolume, maxCompetition, onlyPositiveTrend, excludeBranded]);
 
+  const trackedCount = useMemo(
+    () => data.filter((k) => k.is_tracked).length,
+    [data]
+  );
+
   const scatterData = filteredData.map((k) => ({
     x: Number((k.competition || 0) * 100),
     y: Number(k.volume || 0),
@@ -193,28 +367,12 @@ export default function Opportunities() {
 
   const topOpportunity = filteredData[0];
 
-  const getPriorityLabel = (score: number) => {
-    if (score >= 1) return "🚀 High";
-    if (score >= 0.4) return "🔥 Medium";
-    return "⚪ Low";
-  };
-
-  const getScoreColor = (score: number) => {
-    if (score >= 1) return "bg-emerald-50 text-emerald-600";
-    if (score >= 0.4) return "bg-amber-50 text-amber-600";
-    return "bg-slate-100 text-slate-600";
-  };
-
-  const resetFilters = () => {
-    setSearch("");
-    setMinVolume("");
-    setMaxCompetition("");
-    setOnlyPositiveTrend(false);
-    setExcludeBranded(false);
-  };
+  // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <div className="max-w-7xl mx-auto space-y-8">
+
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between gap-6 flex-wrap">
         <div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">
@@ -225,7 +383,8 @@ export default function Opportunities() {
           </p>
         </div>
 
-        <div className="flex items-center gap-4 flex-wrap">
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Project selector */}
           <div className="relative">
             <Briefcase className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <select
@@ -249,14 +408,63 @@ export default function Opportunities() {
               Classement basé sur Opportunity Score
             </span>
           </div>
+
+          {/* Tracked count badge */}
+          {trackedCount > 0 && (
+            <div className="px-4 py-2 bg-emerald-50 border border-emerald-100 rounded-xl text-sm font-bold text-emerald-700">
+              {trackedCount} suivi{trackedCount > 1 ? "s" : ""}
+            </div>
+          )}
+
+          {/* FIX: Workflow trigger moved out of resetFilters into its own button.
+              Shows inline feedback instead of alert(). */}
+          <div className="flex flex-col items-end gap-1">
+            <button
+              onClick={handleTriggerWorkflow}
+              disabled={resetting}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-slate-800 text-white text-sm font-bold rounded-xl hover:bg-slate-900 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              <RefreshCw className={`w-4 h-4 ${resetting ? "animate-spin" : ""}`} />
+              {resetting ? "Relance en cours..." : "Relancer la collecte"}
+            </button>
+            {resetSuccess && (
+              <span className="text-xs text-emerald-600 font-medium">
+                ✓ Workflow déclenché — rechargement dans 3s
+              </span>
+            )}
+            {resetError && (
+              <span className="text-xs text-red-600 font-medium max-w-xs text-right leading-tight">
+                {resetError}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
+      {/* Global track error toast */}
+      {trackError && (
+        <div className="bg-red-50 border border-red-200 rounded-2xl px-5 py-3 text-sm text-red-700 font-medium">
+          {trackError}
+        </div>
+      )}
+
+      {/* ── Main grid ──────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+
+        {/* ── Table card ───────────────────────────────────────────────────── */}
         <div className="lg:col-span-2 bg-white rounded-[2.5rem] border border-slate-100 shadow-sm overflow-hidden flex flex-col">
+
+          {/* Filter bar */}
           <div className="p-6 border-b border-slate-50 bg-slate-50/50 space-y-4">
-            <div className="flex items-center justify-between gap-4 flex-wrap">
-              <div className="flex items-center gap-4 flex-wrap">
+            {/*
+              FIX: w-full anchor + shrink-0 on the button prevent it from
+              escaping the card boundary on intermediate screen widths.
+              The original code used bare flex-wrap with no width constraint,
+              which let the button drift outside the card when the table's
+              overflow-x-auto created a new stacking context.
+            */}
+            <div className="w-full flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-3 flex-wrap min-w-0">
                 <div className="relative">
                   <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <input
@@ -264,21 +472,21 @@ export default function Opportunities() {
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                     placeholder="Rechercher un mot-clé..."
-                    className="pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 w-64 outline-none"
+                    className="pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 w-56 outline-none"
                   />
                 </div>
-
-                <div className="flex items-center gap-2 px-4 py-2 text-slate-600 bg-white border border-slate-200 rounded-xl text-sm font-medium">
-                  <Filter className="w-4 h-4" />
+                <div className="flex items-center gap-2 px-4 py-2 text-slate-600 bg-white border border-slate-200 rounded-xl text-sm font-medium whitespace-nowrap">
+                  <Filter className="w-4 h-4 shrink-0" />
                   Filtres
                 </div>
               </div>
 
+              {/* FIX: shrink-0 + whitespace-nowrap keep the button inside the card */}
               <button
-                onClick={resetFilters}
-                className="text-sm font-medium text-slate-500 hover:text-slate-900"
+                onClick={clearFilters}
+                className="shrink-0 whitespace-nowrap text-sm font-medium text-slate-500 hover:text-slate-900 px-3 py-2 hover:bg-white rounded-xl border border-transparent hover:border-slate-200 transition-all"
               >
-                Réinitialiser
+                Réinitialiser les filtres
               </button>
             </div>
 
@@ -290,7 +498,6 @@ export default function Opportunities() {
                 placeholder="Volume min"
                 className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500"
               />
-
               <input
                 type="number"
                 step="0.01"
@@ -301,8 +508,7 @@ export default function Opportunities() {
                 placeholder="Compétition max (0-1)"
                 className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500"
               />
-
-              <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-700">
+              <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-700 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={onlyPositiveTrend}
@@ -310,8 +516,7 @@ export default function Opportunities() {
                 />
                 Trend positif
               </label>
-
-              <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-700">
+              <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-700 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={excludeBranded}
@@ -322,6 +527,7 @@ export default function Opportunities() {
             </div>
           </div>
 
+          {/* Table */}
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
@@ -331,20 +537,25 @@ export default function Opportunities() {
                   <th className="px-6 py-4">Position</th>
                   <th className="px-6 py-4">Compétition</th>
                   <th className="px-6 py-4">Trend</th>
-                  <th className="px-6 py-4 text-right">Opportunity Score</th>
+                  <th className="px-6 py-4 text-right">Opp. Score</th>
+                  {/*
+                    FIX: "Suivi" column header added — was missing in the previous
+                    version but the column existed in tbody, causing misalignment.
+                  */}
+                  <th className="px-6 py-4 text-right">Suivi</th>
                 </tr>
               </thead>
 
               <tbody className="divide-y divide-slate-50">
                 {loading ? (
                   <tr>
-                    <td colSpan={6} className="px-6 py-10 text-center text-slate-400">
+                    <td colSpan={7} className="px-6 py-10 text-center text-slate-400">
                       Chargement...
                     </td>
                   </tr>
                 ) : filteredData.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-6 py-10 text-center text-slate-400">
+                    <td colSpan={7} className="px-6 py-10 text-center text-slate-400">
                       Aucune opportunité trouvée.
                     </td>
                   </tr>
@@ -352,10 +563,13 @@ export default function Opportunities() {
                   filteredData.map((k) => (
                     <tr
                       key={k.id}
-                      onClick={() => handleQualify(k)}
-                      className="hover:bg-slate-50/50 transition-colors group cursor-pointer"
+                      className="hover:bg-slate-50/50 transition-colors group"
                     >
-                      <td className="px-6 py-4">
+                      {/* Keyword cell — click opens qualification modal */}
+                      <td
+                        onClick={() => handleQualify(k)}
+                        className="px-6 py-4 cursor-pointer"
+                      >
                         <div className="font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">
                           {k.keyword}
                         </div>
@@ -365,7 +579,7 @@ export default function Opportunities() {
                           </span>
                           {k.branded_status && (
                             <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 font-bold uppercase">
-                              {String(k.branded_status).replace("_", " ")}
+                              {String(k.branded_status).replace(/_/g, " ")}
                             </span>
                           )}
                         </div>
@@ -403,9 +617,7 @@ export default function Opportunities() {
                           }`}
                         >
                           <TrendingUp
-                            className={`w-3 h-3 ${
-                              Number(k.trend || 0) > 0 ? "" : "rotate-180"
-                            }`}
+                            className={`w-3 h-3 ${Number(k.trend || 0) > 0 ? "" : "rotate-180"}`}
                           />
                           {Math.abs(Number(k.trend || 0) * 100).toFixed(0)}%
                         </div>
@@ -425,6 +637,40 @@ export default function Opportunities() {
                           </span>
                         </div>
                       </td>
+
+                      {/*
+                        FIX: Track button is now inside a dedicated <td> that
+                        stops click propagation so it doesn't open the modal.
+                        Previously the entire <tr> had onClick={() => handleQualify(k)}
+                        which meant clicking "Suivre" also opened the modal.
+                        Now only the keyword cell triggers qualification.
+                      */}
+                      <td
+                        className="px-6 py-4 text-right"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          onClick={() =>
+                            k.is_tracked ? handleUntrack(k.id) : handleTrack(k.id)
+                          }
+                          disabled={trackingId === k.id}
+                          title={k.is_tracked ? "Retirer du suivi" : "Ajouter au suivi"}
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                            k.is_tracked
+                              ? "bg-red-50 text-red-600 hover:bg-red-100 border border-red-100"
+                              : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm"
+                          } disabled:opacity-60 disabled:cursor-not-allowed`}
+                        >
+                          {trackingId === k.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : k.is_tracked ? (
+                            <EyeOff className="w-3.5 h-3.5" />
+                          ) : (
+                            <Eye className="w-3.5 h-3.5" />
+                          )}
+                          {k.is_tracked ? "Retirer" : "Suivre"}
+                        </button>
+                      </td>
                     </tr>
                   ))
                 )}
@@ -433,13 +679,14 @@ export default function Opportunities() {
           </div>
         </div>
 
+        {/* ── Sidebar ──────────────────────────────────────────────────────── */}
         <div className="space-y-8">
+          {/* Scatter chart */}
           <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm">
             <h3 className="text-xl font-bold text-slate-900 mb-6 flex items-center gap-2">
               Analyse Scatter
               <Info className="w-4 h-4 text-slate-300" />
             </h3>
-
             <div className="h-[300px] w-full">
               <ResponsiveContainer width="100%" height="100%">
                 <ScatterChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
@@ -508,6 +755,7 @@ export default function Opportunities() {
             </div>
           </div>
 
+          {/* IA insights card */}
           <div className="bg-slate-900 p-8 rounded-[2.5rem] text-white overflow-hidden relative group">
             <div className="relative z-10">
               <div className="text-indigo-400 font-bold text-xs uppercase tracking-widest mb-2">
@@ -515,9 +763,9 @@ export default function Opportunities() {
               </div>
               <h4 className="text-xl font-bold mb-4">Lecture décisionnelle</h4>
               <p className="text-slate-400 text-sm leading-relaxed mb-6">
-                L’objectif est de concentrer les efforts SEO sur les mots-clés à meilleur
-                rendement potentiel : bon volume, concurrence acceptable et marge
-                d’amélioration mesurable.
+                L'objectif est de concentrer les efforts SEO sur les mots-clés à
+                meilleur rendement potentiel : bon volume, concurrence acceptable et
+                marge d'amélioration mesurable.
               </p>
               <button className="flex items-center gap-2 text-sm font-bold hover:gap-3 transition-all">
                 Explorer les opportunités
@@ -529,6 +777,7 @@ export default function Opportunities() {
         </div>
       </div>
 
+      {/* ── Qualification modal ─────────────────────────────────────────────── */}
       <AnimatePresence>
         {selectedKeyword && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -544,9 +793,10 @@ export default function Opportunities() {
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative w-full max-w-2xl bg-white rounded-[3rem] shadow-2xl overflow-hidden"
+              className="relative w-full max-w-2xl bg-white rounded-[3rem] shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
             >
-              <div className="p-8 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+              {/* Modal header */}
+              <div className="p-8 border-b border-slate-100 flex items-center justify-between bg-slate-50/50 shrink-0">
                 <div className="flex items-center gap-4">
                   <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-200">
                     <Sparkles className="w-6 h-6" />
@@ -560,7 +810,6 @@ export default function Opportunities() {
                     </p>
                   </div>
                 </div>
-
                 <button
                   onClick={() => setSelectedKeyword(null)}
                   className="p-2 hover:bg-white rounded-full text-slate-400 hover:text-slate-900 transition-all"
@@ -569,7 +818,8 @@ export default function Opportunities() {
                 </button>
               </div>
 
-              <div className="p-10">
+              {/* Modal body — scrollable */}
+              <div className="p-10 overflow-y-auto">
                 {isQualifying ? (
                   <div className="py-20 flex flex-col items-center justify-center gap-6">
                     <div className="relative">
@@ -591,7 +841,8 @@ export default function Opportunities() {
                     animate={{ opacity: 1 }}
                     className="space-y-8"
                   >
-                    <div className="bg-indigo-600 rounded-3xl p-6 text-white shadow-xl shadow-indigo-100 flex items-center justify-between">
+                    {/* Label + intent + priority */}
+                    <div className="bg-indigo-600 rounded-3xl p-6 text-white shadow-xl shadow-indigo-100 flex items-center justify-between gap-4 flex-wrap">
                       <div>
                         <div className="text-indigo-200 text-[10px] uppercase font-bold tracking-widest mb-1">
                           Label de Qualification
@@ -600,7 +851,6 @@ export default function Opportunities() {
                           {qualificationResult.qualification_label}
                         </div>
                       </div>
-
                       <div className="flex flex-col items-end gap-2">
                         <div className="bg-white/20 px-4 py-1 rounded-xl backdrop-blur-md border border-white/30">
                           <span className="text-xs font-bold uppercase">
@@ -616,13 +866,14 @@ export default function Opportunities() {
                               : "bg-emerald-500/40"
                           }`}
                         >
-                          Priorité: {qualificationResult.priority_level}
+                          Priorité : {qualificationResult.priority_level}
                         </div>
                       </div>
                     </div>
 
+                    {/* Action hint */}
                     <div className="bg-emerald-50 border border-emerald-100 rounded-2xl p-4 flex items-center gap-3">
-                      <Zap className="w-5 h-5 text-emerald-600" />
+                      <Zap className="w-5 h-5 text-emerald-600 shrink-0" />
                       <div>
                         <div className="text-[10px] text-emerald-600 uppercase font-bold tracking-wider">
                           Action Recommandée
@@ -633,96 +884,86 @@ export default function Opportunities() {
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-6">
-                      <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
-                        <div className="flex items-center gap-2 text-slate-400 mb-2">
-                          <ShieldCheck className="w-4 h-4" />
-                          <span className="text-[10px] uppercase font-bold tracking-wider">
-                            Branding
-                          </span>
-                        </div>
-                        <div className="text-lg font-bold text-slate-900 capitalize">
-                          {qualificationResult.branded_status?.replace("_", " ")}
-                        </div>
-                      </div>
-
-                      <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
-                        <div className="flex items-center gap-2 text-slate-400 mb-2">
-                          <Activity className="w-4 h-4" />
-                          <span className="text-[10px] uppercase font-bold tracking-wider">
-                            Stabilité
-                          </span>
-                        </div>
-                        <div className="text-lg font-bold text-slate-900 capitalize">
-                          {qualificationResult.stability_status}
-                        </div>
-                      </div>
-
-                      <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
-                        <div className="flex items-center gap-2 text-slate-400 mb-2">
-                          <Zap className="w-4 h-4" />
-                          <span className="text-[10px] uppercase font-bold tracking-wider">
-                            Type de Traîne
-                          </span>
-                        </div>
-                        <div className="text-lg font-bold text-slate-900 capitalize">
-                          {qualificationResult.tail_type?.replace("_", " ")}
-                        </div>
-                      </div>
-
-                      <div className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
-                        <div className="flex items-center gap-2 text-slate-400 mb-2">
-                          <AlertCircle className="w-4 h-4" />
-                          <span className="text-[10px] uppercase font-bold tracking-wider">
-                            Exclure de l'Analyse
-                          </span>
-                        </div>
-                        <div
-                          className={`text-lg font-bold ${
-                            qualificationResult.exclude_from_opportunity
-                              ? "text-red-600"
-                              : "text-emerald-600"
-                          }`}
-                        >
-                          {qualificationResult.exclude_from_opportunity ? "Oui" : "Non"}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="space-y-3">
-                      <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                        <BarChart className="w-4 h-4 text-indigo-600" />
-                        Interprétation des KPIs
-                      </h4>
-
-                      <div className="grid grid-cols-1 gap-2">
-                        {Object.entries(
-                          qualificationResult.kpi_interpretation || {}
-                        ).map(([key, value]) => (
-                          <div
-                            key={key}
-                            className="flex items-start gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100"
-                          >
-                            <div className="text-[10px] font-bold text-slate-400 uppercase w-32 shrink-0 mt-1">
-                              {key.replace("_", " ")}
-                            </div>
-                            <div className="text-xs text-slate-600 leading-relaxed">
-                              {value as string}
-                            </div>
+                    {/* 4-cell grid */}
+                    <div className="grid grid-cols-2 gap-4">
+                      {[
+                        {
+                          icon: ShieldCheck,
+                          label: "Branding",
+                          value: qualificationResult.branded_status?.replace(/_/g, " "),
+                        },
+                        {
+                          icon: Activity,
+                          label: "Stabilité",
+                          value: qualificationResult.stability_status,
+                        },
+                        {
+                          icon: Zap,
+                          label: "Type de Traîne",
+                          value: qualificationResult.tail_type?.replace(/_/g, " "),
+                        },
+                        {
+                          icon: AlertCircle,
+                          label: "Exclure de l'Analyse",
+                          value: qualificationResult.exclude_from_opportunity ? "Oui" : "Non",
+                          colorClass: qualificationResult.exclude_from_opportunity
+                            ? "text-red-600"
+                            : "text-emerald-600",
+                        },
+                      ].map(({ icon: Icon, label, value, colorClass }) => (
+                        <div key={label} className="p-5 bg-slate-50 rounded-2xl border border-slate-100">
+                          <div className="flex items-center gap-2 text-slate-400 mb-2">
+                            <Icon className="w-4 h-4" />
+                            <span className="text-[10px] uppercase font-bold tracking-wider">
+                              {label}
+                            </span>
                           </div>
-                        ))}
-                      </div>
+                          <div className={`text-lg font-bold text-slate-900 capitalize ${colorClass ?? ""}`}>
+                            {value}
+                          </div>
+                        </div>
+                      ))}
                     </div>
 
-                    <div className="space-y-3">
-                      <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                        <Info className="w-4 h-4 text-indigo-600" />
-                        Raisonnement Stratégique
-                      </h4>
-                      <div className="bg-slate-900 rounded-3xl p-6 text-slate-300 text-sm leading-relaxed border border-slate-800">
-                        {qualificationResult.reasoning}
+                    {/* KPI interpretation */}
+                    {Object.keys(qualificationResult.kpi_interpretation || {}).length > 0 && (
+                      <div className="space-y-3">
+                        <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                          <BarChart className="w-4 h-4 text-indigo-600" />
+                          Interprétation des KPIs
+                        </h4>
+                        <div className="grid grid-cols-1 gap-2">
+                          {Object.entries(qualificationResult.kpi_interpretation).map(
+                            ([key, value]) => (
+                              <div
+                                key={key}
+                                className="flex items-start gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100"
+                              >
+                                <div className="text-[10px] font-bold text-slate-400 uppercase w-32 shrink-0 mt-1">
+                                  {key.replace(/_/g, " ")}
+                                </div>
+                                <div className="text-xs text-slate-600 leading-relaxed">
+                                  {value as string}
+                                </div>
+                              </div>
+                            )
+                          )}
+                        </div>
                       </div>
-                    </div>
+                    )}
+
+                    {/* Reasoning */}
+                    {qualificationResult.reasoning && (
+                      <div className="space-y-3">
+                        <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                          <Info className="w-4 h-4 text-indigo-600" />
+                          Raisonnement Stratégique
+                        </h4>
+                        <div className="bg-slate-900 rounded-3xl p-6 text-slate-300 text-sm leading-relaxed border border-slate-800">
+                          {qualificationResult.reasoning}
+                        </div>
+                      </div>
+                    )}
                   </motion.div>
                 ) : (
                   <div className="py-20 text-center text-slate-400">

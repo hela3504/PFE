@@ -285,44 +285,181 @@ def compute_kpis(project_id: int, date: str):
     finally:
         db.close()
 
-def nlp_qualify(project_id: int, date: str, keywords_to_process: Optional[List[dict]] = None):
+import json
+from typing import Optional, List
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+
+def nlp_qualify(
+    project_id: int,
+    date: str,
+    keywords_to_process: Optional[List[dict]] = None,
+    project_brands: Optional[List[str]] = None,
+):
     db = SessionLocal()
     try:
-        # If no keywords provided, read from ScoresDaily for that date
+        if project_brands is None:
+            project_brands = []
+
+        # Si aucun mot-clé n'est fourni, on lit depuis ScoresDaily
         if not keywords_to_process:
-            scores = db.query(ScoresDaily).filter(ScoresDaily.projectId == project_id, ScoresDaily.date == date).all()
-            keywords_to_process = [{"keyword": s.keyword, "opportunity_score": s.opportunity_score} for s in scores]
-        
+            scores = (
+                db.query(ScoresDaily)
+                .filter(
+                    ScoresDaily.projectId == project_id,
+                    ScoresDaily.date == date
+                )
+                .all()
+            )
+
+            keywords_to_process = []
+            for s in scores:
+                keywords_to_process.append({
+                    "keyword": s.keyword,
+                    "opportunity_score": getattr(s, "opportunity_score", None),
+                    "competition_score": getattr(s, "competition_score", None),
+                    "ctr_gap": getattr(s, "ctr_gap", None),
+                    "performance_drift": getattr(s, "performance_drift", None),
+                    "long_tail_indicator": getattr(s, "long_tail_indicator", None),
+                })
+
         if not keywords_to_process:
             return {"success": True, "message": "No keywords to qualify"}
 
+        # Enrichissement simple côté backend avant envoi à Gemini
+        def heuristic_tail_type(keyword: str) -> str:
+            return "long_tail" if len(keyword.strip().split()) >= 3 else "generic"
+
+        def heuristic_branded(keyword: str, brands: List[str]) -> bool:
+            kw = keyword.lower()
+            return any(brand.lower() in kw for brand in brands if brand)
+
+        def heuristic_intent(keyword: str) -> str:
+            kw = keyword.lower()
+            transactional_terms = [
+                "prix", "acheter", "commande", "promo", "promotions",
+                "livraison", "devis", "réserver", "reservation", "buy",
+                "shop", "order", "discount"
+            ]
+            navigational_terms = [
+                "login", "connexion", "contact", "adresse", "site officiel",
+                "official site", "facebook", "instagram"
+            ]
+
+            if any(term in kw for term in transactional_terms):
+                return "transactionnelle"
+            if any(term in kw for term in navigational_terms):
+                return "navigationnelle"
+            return "informationnelle"
+
+        enriched_keywords = []
+        for item in keywords_to_process:
+            keyword = str(item.get("keyword", "")).strip()
+            if not keyword:
+                continue
+
+            enriched_keywords.append({
+                "keyword": keyword,
+                "opportunity_score": item.get("opportunity_score"),
+                "competition_score": item.get("competition_score"),
+                "ctr_gap": item.get("ctr_gap"),
+                "performance_drift": item.get("performance_drift"),
+                "long_tail_indicator": item.get("long_tail_indicator"),
+                "heuristic_tail_type": heuristic_tail_type(keyword),
+                "heuristic_branded": heuristic_branded(keyword, project_brands),
+                "heuristic_intent": heuristic_intent(keyword),
+            })
+
+        if not enriched_keywords:
+            return {"success": True, "message": "No valid keywords to qualify"}
+
         client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        prompt = f"""Tu es le module "ML & NLP Intelligence" d’une plateforme SaaS SEO.
-Analyse et enrichis les mots-clés suivants pour la "Qualification Automatique".
 
-Données (JSON): {json.dumps(keywords_to_process)}
+        prompt = f"""
+Tu es un expert SEO senior chargé de la qualification automatique de mots-clés pour une plateforme SaaS SEO.
 
-Ta mission :
-1) Qualification Automatique multi-dimension :
-   - branded_status: branded|non_branded
-   - stability_status: stable|opportunity
-   - tail_type: long_tail|generic
-   - search_intent: informationnelle|transactionnelle|navigationnelle
+OBJECTIF :
+Classifier chaque mot-clé avec précision pour aider à la priorisation SEO.
+Évite les réponses génériques ou répétitives.
+Tous les mots-clés ne sont PAS informationnels.
+Tous les mots-clés ne sont PAS non_branded.
 
-2) Filtrage stratégique :
-   - exclude_from_opportunity: true si branded ET stable, sinon false
+MARQUES DU PROJET :
+{json.dumps(project_brands, ensure_ascii=False)}
 
-3) KPIs décisionnels (interprétation) :
-   - Explique brièvement comment les KPIs influencent la décision.
+DONNÉES À ANALYSER :
+{json.dumps(enriched_keywords, ensure_ascii=False)}
 
-4) Sortie :
-   - qualification_label (court)
-   - priority_level (low|medium|high)
-   - action_hint (1 action principale)
+RÈGLES :
 
-RETOURNE UNIQUEMENT UN TABLEAU JSON d'objets avec ces clés:
-keyword, branded_status, stability_status, tail_type, search_intent, exclude_from_opportunity, qualification_label, priority_level, action_hint, reasoning"""
+1. branded_status
+- "branded" si le mot-clé contient une marque du projet, un nom de domaine, ou une variante très proche.
+- sinon "non_branded"
+- utilise aussi le champ heuristic_branded comme signal fort
+
+2. search_intent
+- "informationnelle" : recherche d'explication, définition, guide, avis, symptôme, bienfait
+- "transactionnelle" : achat, prix, promo, commande, livraison, devis, réserver
+- "navigationnelle" : recherche d'une marque, d'un site, d'une page ou d'un contact précis
+- utilise aussi le champ heuristic_intent comme indice, pas comme vérité absolue
+
+3. tail_type
+- "long_tail" si le mot-clé contient 3 mots ou plus et exprime une recherche spécifique
+- sinon "generic"
+- utilise aussi heuristic_tail_type comme signal fort
+
+4. stability_status
+- "stable" seulement si le mot-clé semble déjà bien performer ou déjà protégé
+- sinon "opportunity"
+- si doute, préférer "opportunity"
+
+5. exclude_from_opportunity
+- true seulement si branded_status = branded ET stability_status = stable
+- sinon false
+
+6. qualification_label
+Choisir parmi :
+- "Quick Win"
+- "High Potential"
+- "Brand Protection"
+- "To Monitor"
+- "Low Priority"
+
+7. priority_level
+Choisir parmi :
+- "low"
+- "medium"
+- "high"
+
+8. action_hint
+Une seule action principale, courte et concrète.
+
+9. reasoning
+Une explication courte, spécifique, et liée au mot-clé.
+
+IMPORTANT :
+- Retourne UNIQUEMENT un tableau JSON valide.
+- N'utilise pas systématiquement les mêmes classes.
+- Si un mot-clé contient une marque évidente, il doit être branded.
+- Si un mot-clé semble commercial, local ou orienté achat, évite de le mettre automatiquement en informationnelle.
+- Respecte strictement les valeurs autorisées.
+
+FORMAT OBLIGATOIRE :
+[
+  {{
+    "keyword": "...",
+    "branded_status": "branded|non_branded",
+    "stability_status": "stable|opportunity",
+    "tail_type": "long_tail|generic",
+    "search_intent": "informationnelle|transactionnelle|navigationnelle",
+    "exclude_from_opportunity": true,
+    "qualification_label": "Quick Win|High Potential|Brand Protection|To Monitor|Low Priority",
+    "priority_level": "low|medium|high",
+    "action_hint": "...",
+    "reasoning": "..."
+  }}
+]
+"""
 
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
@@ -331,14 +468,82 @@ keyword, branded_status, stability_status, tail_type, search_intent, exclude_fro
                 response_mime_type="application/json"
             )
         )
-        results = json.loads(response.text)
-        
+
+        raw_text = response.text or "[]"
+        results = json.loads(raw_text)
+
+        if not isinstance(results, list):
+            raise ValueError("Gemini response is not a list")
+
+        allowed_branded = {"branded", "non_branded"}
+        allowed_stability = {"stable", "opportunity"}
+        allowed_tail = {"long_tail", "generic"}
+        allowed_intent = {"informationnelle", "transactionnelle", "navigationnelle"}
+        allowed_priority = {"low", "medium", "high"}
+        allowed_labels = {
+            "Quick Win",
+            "High Potential",
+            "Brand Protection",
+            "To Monitor",
+            "Low Priority",
+        }
+
+        saved_results = []
+
         for res in results:
+            keyword = str(res.get("keyword", "")).strip()
+            if not keyword:
+                continue
+
+            branded_status = str(res.get("branded_status", "non_branded")).strip()
+            stability_status = str(res.get("stability_status", "opportunity")).strip()
+            tail_type = str(res.get("tail_type", heuristic_tail_type(keyword))).strip()
+            search_intent = str(res.get("search_intent", heuristic_intent(keyword))).strip()
+            exclude_from_opportunity = bool(res.get("exclude_from_opportunity", False))
+            qualification_label = str(res.get("qualification_label", "To Monitor")).strip()
+            priority_level = str(res.get("priority_level", "medium")).strip()
+            action_hint = str(res.get("action_hint", "Analyser et prioriser ce mot-clé")).strip()
+            reasoning = str(res.get("reasoning", "")).strip()
+
+            # Garde-fous
+            if branded_status not in allowed_branded:
+                branded_status = "branded" if heuristic_branded(keyword, project_brands) else "non_branded"
+
+            if stability_status not in allowed_stability:
+                stability_status = "opportunity"
+
+            if tail_type not in allowed_tail:
+                tail_type = heuristic_tail_type(keyword)
+
+            if search_intent not in allowed_intent:
+                search_intent = heuristic_intent(keyword)
+
+            if priority_level not in allowed_priority:
+                priority_level = "medium"
+
+            if qualification_label not in allowed_labels:
+                qualification_label = "To Monitor"
+
+            # Recalcul de sécurité
+            exclude_from_opportunity = (branded_status == "branded" and stability_status == "stable")
+
             stmt = pg_insert(NLPEnrichment).values(
-                projectId=project_id, date=date, **res
+                projectId=project_id,
+                date=date,
+                keyword=keyword,
+                branded_status=branded_status,
+                stability_status=stability_status,
+                tail_type=tail_type,
+                search_intent=search_intent,
+                exclude_from_opportunity=exclude_from_opportunity,
+                qualification_label=qualification_label,
+                priority_level=priority_level,
+                action_hint=action_hint,
+                reasoning=reasoning,
             )
+
             stmt = stmt.on_conflict_do_update(
-                constraint='_nlp_project_keyword_date_uc',
+                constraint="_nlp_project_keyword_date_uc",
                 set_={
                     "branded_status": stmt.excluded.branded_status,
                     "stability_status": stmt.excluded.stability_status,
@@ -348,55 +553,185 @@ keyword, branded_status, stability_status, tail_type, search_intent, exclude_fro
                     "qualification_label": stmt.excluded.qualification_label,
                     "priority_level": stmt.excluded.priority_level,
                     "action_hint": stmt.excluded.action_hint,
-                    "reasoning": stmt.excluded.reasoning
+                    "reasoning": stmt.excluded.reasoning,
                 }
             )
+
             db.execute(stmt)
-        
+
+            saved_results.append({
+                "keyword": keyword,
+                "branded_status": branded_status,
+                "stability_status": stability_status,
+                "tail_type": tail_type,
+                "search_intent": search_intent,
+                "exclude_from_opportunity": exclude_from_opportunity,
+                "qualification_label": qualification_label,
+                "priority_level": priority_level,
+                "action_hint": action_hint,
+                "reasoning": reasoning,
+            })
+
         db.commit()
-        return {"success": True, "results": results}
+        return {"success": True, "results": saved_results}
+
+    except Exception as e:
+        db.rollback()
+        return {
+            "success": False,
+            "error": str(e),
+        }
     finally:
         db.close()
 
 def cluster_keywords(project_id: int):
     db = SessionLocal()
     try:
-        keywords = db.query(GSCDaily.keyword).filter(GSCDaily.projectId == project_id).distinct().all()
+        keywords = (
+            db.query(GSCDaily.keyword)
+            .filter(GSCDaily.projectId == project_id)
+            .distinct()
+            .all()
+        )
+
         if not keywords:
             return {"success": True, "clusters": []}
-        
-        keyword_list = ", ".join([k.keyword for k in keywords])
-        prompt = f"""Tu es un expert SEO. Regroupe les mots-clés suivants en clusters sémantiques logiques. 
-        Pour chaque cluster, donne un nom, une brève description, la liste des mots-clés et un niveau de priorité (High, Medium, Low).
-        Mots-clés: {keyword_list}
-        RETOURNE UNIQUEMENT UN TABLEAU JSON d'objets avec ces clés: cluster_name, description, keywords (array), priority"""
+
+        keyword_list = [k.keyword.strip() for k in keywords if k.keyword and k.keyword.strip()]
+
+        if not keyword_list:
+            return {"success": True, "clusters": []}
 
         client = genai.Client(api_key=GEMINI_API_KEY)
+
+        prompt = f"""
+Tu es un expert SEO senior spécialisé en clustering sémantique.
+
+MISSION :
+Regrouper les mots-clés suivants en clusters thématiques SEO cohérents, utiles et exploitables pour une stratégie de contenu.
+
+MOTS-CLÉS :
+{json.dumps(keyword_list, ensure_ascii=False)}
+
+RÈGLES :
+1. Un cluster doit regrouper des mots-clés proches par sujet, intention ou univers sémantique.
+2. Les clusters doivent être utiles pour piloter une stratégie SEO ou éditoriale.
+3. Évite les clusters trop larges ou vagues.
+4. Évite les clusters d’un seul mot-clé sauf si le sujet est vraiment isolé.
+5. Le nom du cluster doit être clair, court et exploitable.
+6. La description doit être courte, concrète et compréhensible.
+7. La priorité doit être l’une de ces valeurs uniquement :
+   - "High"
+   - "Medium"
+   - "Low"
+
+IMPORTANT :
+- Retourne UNIQUEMENT un tableau JSON valide.
+- Ne retourne aucun texte hors JSON.
+- Chaque mot-clé doit apparaître dans un seul cluster principal.
+- Si certains mots-clés sont très proches, regroupe-les ensemble.
+
+FORMAT DE SORTIE OBLIGATOIRE :
+[
+  {{
+    "cluster_name": "...",
+    "description": "...",
+    "keywords": ["...", "..."],
+    "priority": "High|Medium|Low"
+  }}
+]
+"""
+
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
             contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
         )
-        clusters = json.loads(response.text)
-        
-        # Clear old clusters
-        db.query(KeywordCluster).filter(KeywordCluster.projectId == project_id).delete()
-        
+
+        raw_text = response.text or "[]"
+        clusters = json.loads(raw_text)
+
+        if not isinstance(clusters, list):
+            raise ValueError("Gemini response is not a list")
+
+        allowed_priorities = {"High", "Medium", "Low"}
+        used_keywords = set()
+        cleaned_clusters = []
+
         for c in clusters:
+            cluster_name = str(c.get("cluster_name", "")).strip()
+            description = str(c.get("description", "")).strip()
+            priority = str(c.get("priority", "Medium")).strip()
+            cluster_keywords_raw = c.get("keywords", [])
+
+            if not isinstance(cluster_keywords_raw, list):
+                cluster_keywords_raw = []
+
+            cleaned_keywords = []
+            for kw in cluster_keywords_raw:
+                kw_str = str(kw).strip()
+                if kw_str and kw_str in keyword_list and kw_str not in used_keywords:
+                    cleaned_keywords.append(kw_str)
+                    used_keywords.add(kw_str)
+
+            if not cluster_name:
+                cluster_name = "Cluster SEO"
+
+            if not description:
+                description = f"Groupe de mots-clés liés à {cluster_name.lower()}."
+
+            if priority not in allowed_priorities:
+                priority = "Medium"
+
+            if cleaned_keywords:
+                cleaned_clusters.append({
+                    "cluster_name": cluster_name,
+                    "description": description,
+                    "keywords": cleaned_keywords,
+                    "priority": priority,
+                })
+
+        # Ajouter les mots-clés oubliés par Gemini
+        remaining_keywords = [kw for kw in keyword_list if kw not in used_keywords]
+        if remaining_keywords:
+            cleaned_clusters.append({
+                "cluster_name": "Autres opportunités",
+                "description": "Mots-clés restants non regroupés automatiquement.",
+                "keywords": remaining_keywords,
+                "priority": "Low",
+            })
+
+        # Supprimer les anciens clusters
+        db.query(KeywordCluster).filter(KeywordCluster.projectId == project_id).delete()
+
+        # Insérer les nouveaux
+        for c in cleaned_clusters:
             new_cluster = KeywordCluster(
                 projectId=project_id,
-                cluster_name=c['cluster_name'],
-                description=c['description'],
-                keywords=json.dumps(c['keywords']),
-                priority=c['priority']
+                cluster_name=c["cluster_name"],
+                description=c["description"],
+                keywords=json.dumps(c["keywords"], ensure_ascii=False),
+                priority=c["priority"],
             )
             db.add(new_cluster)
+
         db.commit()
-        return {"success": True, "clusters": clusters}
+        return {"success": True, "clusters": cleaned_clusters}
+
+    except Exception as e:
+        db.rollback()
+        return {
+            "success": False,
+            "error": str(e),
+        }
     finally:
         db.close()
+
 
 if __name__ == "__main__":
     # Example usage when running as a script
     init_db()
     print("SEO Intelligence Utility Script Ready")
+ 

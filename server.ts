@@ -42,6 +42,7 @@ async function initDb() {
         domain TEXT,
         country TEXT,
         language TEXT,
+        branded_keywords TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         userid INTEGER REFERENCES users(id)
       );
@@ -162,6 +163,18 @@ async function initDb() {
       ADD COLUMN IF NOT EXISTS top_organic_urls TEXT;
     `);
 
+    // Add is_tracked column if not exists (idempotent migration)
+    await pool.query(`
+      ALTER TABLE keywords
+      ADD COLUMN IF NOT EXISTS is_tracked BOOLEAN DEFAULT FALSE;
+    `);
+
+    // Add branded_keywords to projects (idempotent migration)
+    await pool.query(`
+      ALTER TABLE projects
+      ADD COLUMN IF NOT EXISTS branded_keywords TEXT;
+    `);
+
     await pool.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS keywords_project_keyword_unique
       ON keywords (projectid, keyword);
@@ -249,6 +262,69 @@ async function upsertKeywords(projectId: number, data: any[]) {
       [projectId, kw]
     );
   }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NLP HELPERS — Classification par règles locales (sans LLM, instantané)
+// FIX: Garantit la diversité des intents même si le LLM échoue ou n'est pas appelé
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TRANSACTIONAL_SIGNALS = [
+  "acheter","achat","commander","commande","prix","tarif","tarifs","devis",
+  "promo","promotion","solde","soldes","reduction","réduction","pas cher",
+  "bon marché","moins cher","offre","offres","livraison","expédition",
+  "boutique","shop","store","abonnement","forfait","comparatif","comparaison",
+  "meilleur prix","inscription","essai gratuit","télécharger","download","installer",
+];
+
+const NAVIGATIONAL_SIGNALS = [
+  "connexion","login","se connecter","mon compte","espace client",
+  "espace personnel","tableau de bord","dashboard","accueil","accès",
+  ".com",".fr","officiel","site officiel","portail","compte",
+];
+
+const INFORMATIONAL_SIGNALS = [
+  "comment","pourquoi","qu'est","qu est","c'est quoi","c est quoi",
+  "définition","definition","guide","tutoriel","tutorial","apprendre",
+  "comprendre","expliquer","explication","différence","difference",
+  "vs "," vs","versus","que faire","quand ","où ","qui est",
+  "histoire de","signification",
+];
+
+function classifyByRules(
+  keyword: string,
+  brandedKeywords: string[] = []
+): {
+  search_intent: "informationnelle" | "transactionnelle" | "navigationnelle";
+  branded_status: "branded" | "non_branded";
+  tail_type: "long_tail" | "generic";
+  confidence: "high" | "medium" | "low";
+} {
+  const kw = keyword.toLowerCase().trim();
+  const words = kw.split(/\s+/);
+  const branded_status = brandedKeywords.some((b) => kw.includes(b.toLowerCase()))
+    ? "branded" : "non_branded";
+  const tail_type: "long_tail" | "generic" = words.length >= 4 ? "long_tail" : "generic";
+  const tScore = TRANSACTIONAL_SIGNALS.filter((s) => kw.includes(s)).length;
+  const nScore = NAVIGATIONAL_SIGNALS.filter((s) => kw.includes(s)).length;
+  const iScore = INFORMATIONAL_SIGNALS.filter((s) => kw.includes(s)).length;
+  let search_intent: "informationnelle" | "transactionnelle" | "navigationnelle";
+  let confidence: "high" | "medium" | "low";
+  if (tScore > 0) {
+    search_intent = "transactionnelle";
+    confidence = tScore >= 2 ? "high" : "medium";
+  } else if (nScore > 0) {
+    search_intent = "navigationnelle";
+    confidence = nScore >= 2 ? "high" : "medium";
+  } else if (iScore > 0) {
+    search_intent = "informationnelle";
+    confidence = iScore >= 2 ? "high" : "medium";
+  } else {
+    search_intent = words.length <= 2 ? "navigationnelle" : "informationnelle";
+    confidence = "low";
+  }
+  return { search_intent, branded_status, tail_type, confidence };
 }
 
 app.post("/api/auth/login", async (req, res) => {
@@ -405,7 +481,7 @@ app.post("/api/ingest/gsc", checkApiKey, async (req, res) => {
       values.push(
         Number(projectId),
         item.keyword,
-        item.date,
+        normalizeDate(item.date),   // FIX: normalize ISO dates to YYYY-MM-DD
         item.impressions ?? 0,
         item.clicks ?? 0,
         item.position ?? 0,
@@ -454,6 +530,7 @@ app.post("/api/ingest/serp", checkApiKey, async (req, res) => {
 
     const values: any[] = [];
     const placeholders: string[] = [];
+    console.log("DATA", data);
 
     data.forEach((item, i) => {
       const idx = i * 17;
@@ -464,7 +541,7 @@ app.post("/api/ingest/serp", checkApiKey, async (req, res) => {
       values.push(
         Number(projectId),
         item.keyword,
-        item.date,
+        normalizeDate(item.date),   // FIX: normalize ISO dates to YYYY-MM-DD
         item.position ?? 0,
         item.competition ?? 0,
         item.volume ?? 0,
@@ -517,85 +594,274 @@ app.post("/api/ingest/serp", checkApiKey, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// KPI HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KPI COMPUTATION — GSC-FIRST
+// Tous les KPIs sont calculables uniquement avec les données GSC.
+// SERP est utilisé en bonus si disponible, jamais requis.
+//
+// Formules basées uniquement sur GSC :
+//   position    → proxy de visibilité + ctr_gap
+//   ctr         → performance réelle vs benchmark
+//   impressions → proxy du volume de recherche
+//   clicks      → trafic organique réel
+//   drift       → comparaison J vs J-1
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Benchmark CTR par position (Backlinko / AWR)
+const EXPECTED_CTR_BY_POSITION: Record<number, number> = {
+  1: 0.284, 2: 0.151, 3: 0.103, 4: 0.073, 5: 0.057,
+  6: 0.045, 7: 0.036, 8: 0.030, 9: 0.025, 10: 0.021,
+};
+
+function getExpectedCtr(position: number): number {
+  const pos = Math.max(1, Math.min(10, Math.round(Number(position) || 10)));
+  return EXPECTED_CTR_BY_POSITION[pos] ?? 0.01;
+}
+
+function normalizeDate(d: any): string {
+  return String(d || "").slice(0, 10);
+}
+
+// competition_score — GSC-first
+// Sans données SERP : estimé depuis la position GSC
+// Avec données SERP : enrichi avec PAA, AI Overview, domaines
+function computeCompetitionScore(gscRow: any, serpRow?: any): number {
+  const pos = Number(gscRow?.position) || 50;
+
+  // Estimation depuis la position GSC seule :
+  // Plus la position est haute (proche de 1), plus la compétition est forte
+  let score: number;
+  if (pos <= 3)       score = 0.85;
+  else if (pos <= 5)  score = 0.70;
+  else if (pos <= 10) score = 0.55;
+  else if (pos <= 20) score = 0.40;
+  else if (pos <= 30) score = 0.30;
+  else                score = 0.20;
+
+  // Bonus SERP si disponible (optionnel)
+  if (serpRow) {
+    const rawComp = Number(serpRow.competition);
+    if (rawComp > 0) {
+      // Moyenne pondérée : 60% position GSC + 40% competition SERP
+      score = score * 0.6 + rawComp * 0.4;
+    }
+    if (serpRow.ai_overview_present === true || serpRow.ai_overview_present === "true") score = Math.min(1, score + 0.10);
+    const paa = Number(serpRow.paa_count ?? 0);
+    if (paa >= 4) score = Math.min(1, score + 0.08);
+    else if (paa >= 2) score = Math.min(1, score + 0.04);
+  }
+
+  return Math.round(score * 1000) / 1000;
+}
+
+// ctr_gap = CTR attendu selon position - CTR réel GSC
+// Toujours calculable avec GSC seul
+function computeCtrGap(position: number, realCtr: number): number {
+  const expected = getExpectedCtr(Number(position) || 20);
+  const real = Number(realCtr) || 0;
+  return Math.round((expected - real) * 10000) / 10000;
+}
+
+// opportunity_score — 100% basé sur GSC
+// Logique :
+//   (1) position améliorable = entre 4 et 50
+//   (2) ctr en dessous du benchmark = marge de gain
+//   (3) impressions = proxy du volume (plus d'impressions = plus de trafic potentiel)
+//   (4) long_tail = bonus (moins de concurrence)
+//
+// Score final : 0 à 1, jamais 0 si la position est améliorable
+function computeOpportunityScore(params: {
+  position: number;
+  ctr: number;
+  impressions: number;
+  ctr_gap: number;
+  competition_score: number;
+  long_tail_indicator: number;
+  clicks: number;
+  // SERP optionnel — utilisé si volume disponible
+  volume?: number;
+}): number {
+  const { position, ctr, impressions, ctr_gap, competition_score, long_tail_indicator, clicks, volume } = params;
+
+  const pos  = Number(position)   || 50;
+  const imp  = Number(impressions)|| 0;
+  const gap  = Number(ctr_gap)    || 0;
+  const comp = Number(competition_score) || 0.5;
+
+  // Seules les positions améliorables comptent
+  if (pos < 4 || pos > 50) return 0;
+  // Pas d'impressions = pas de visibilité = pas d'opportunité calculable
+  if (imp === 0) return 0;
+
+  // ── Composante 1 : Potentiel CTR (toujours dispo via GSC) ────────────────
+  // gap > 0 = on est sous le benchmark → on peut gagner du CTR
+  const ctrPotential = Math.max(0, gap);
+
+  // ── Composante 2 : Potentiel de position (position améliorable) ──────────
+  // Plus on est loin de la position 1, plus le gain potentiel est grand
+  // Normalisé entre 0 et 1
+  const positionPotential = Math.min(1, (pos - 3) / 47);
+
+  // ── Composante 3 : Poids du volume (impressions GSC ou volume SERP) ──────
+  // On utilise le volume SERP si disponible et > 0, sinon les impressions GSC
+  const vol = (volume && volume > 0) ? volume : imp;
+  // Normalisation logarithmique pour éviter que les gros volumes écrasent tout
+  // log10(1000 imp) = 3, log10(100) = 2, log10(10) = 1
+  const volumeWeight = Math.min(1, Math.log10(Math.max(1, vol)) / 4); // max à 10 000
+
+  // ── Score final ──────────────────────────────────────────────────────────
+  // (1 - comp) = espace disponible sur le marché
+  // ctrPotential = marge de gain CTR
+  // positionPotential = distance à améliorer
+  // volumeWeight = importance de la requête
+  let score = (1 - comp) * (ctrPotential + positionPotential * 0.3) * volumeWeight;
+
+  // Bonus long tail
+  if (long_tail_indicator === 1) score *= 1.25;
+
+  return Math.min(1, Math.round(score * 10000) / 10000);
+}
+
 app.post("/api/compute/kpis", checkApiKey, async (req, res) => {
   const { projectId, date } = req.body;
+  if (!projectId || !date) return res.status(400).json({ error: "projectId and date are required" });
 
-  if (!projectId || !date) {
-    return res.status(400).json({ error: "projectId and date are required" });
-  }
+  const nd = normalizeDate(date);
+  console.log(`\n[KPI] ▶ START compute/kpis projectId=${projectId} date=${nd}`);
 
   try {
     const exists = await ensureProjectExists(Number(projectId));
-    if (!exists) {
-      return res.status(404).json({ error: `Project ${projectId} not found` });
-    }
+    if (!exists) return res.status(404).json({ error: `Project ${projectId} not found` });
 
-    const gscRes = await pool.query(
-      "SELECT * FROM gsc_daily WHERE projectid = $1 AND date = $2",
-      [projectId, date]
-    );
-
-    const serpRes = await pool.query(
-      "SELECT * FROM serp_daily WHERE projectid = $1 AND date = $2",
-      [projectId, date]
-    );
+    // GSC = source principale (toujours requise)
+    // SERP = source optionnelle (enrichissement si disponible)
+    // Jour précédent = pour le performance_drift
+    const [gscRes, serpRes, prevGscRes] = await Promise.all([
+      pool.query(
+        `SELECT * FROM gsc_daily WHERE projectid=$1 AND LEFT(date::text,10)=$2`,
+        [projectId, nd]
+      ),
+      pool.query(
+        `SELECT keyword, competition, volume, paa_count, ai_overview_present, serp_top3_domains
+         FROM serp_daily WHERE projectid=$1 AND LEFT(date::text,10)=$2`,
+        [projectId, nd]
+      ),
+      pool.query(
+        `SELECT keyword, position, ctr, impressions, clicks
+         FROM gsc_daily
+         WHERE projectid=$1
+           AND LEFT(date::text,10) = (($2::date) - interval '1 day')::text`,
+        [projectId, nd]
+      ),
+    ]);
 
     const gscData = gscRes.rows;
     const serpData = serpRes.rows;
+
+    console.log(`[KPI] GSC rows    : ${gscData.length}`);
+    console.log(`[KPI] SERP rows   : ${serpData.length} (optionnel)`);
+    if (gscData.length > 0) {
+      const s = gscData[0];
+      console.log(`[KPI] GSC sample  : keyword="${s.keyword}" pos=${s.position} ctr=${s.ctr} imp=${s.impressions} clicks=${s.clicks}`);
+    }
+
+    if (gscData.length === 0) {
+      console.warn(`[KPI] ⚠ NO GSC DATA for project=${projectId} date=${nd}`);
+      return res.json({ success: true, count: 0, warning: `No GSC data for project ${projectId} on ${nd}` });
+    }
+
+    // Maps pour accès O(1)
+    const serpMap = new Map<string, any>(serpData.map((s: any) => [s.keyword, s]));
+    const prevGscMap = new Map<string, any>(prevGscRes.rows.map((r: any) => [r.keyword, r]));
+
     const results: any[] = [];
+    let serpMatchCount = 0;
 
     for (const g of gscData) {
-      const s: any = serpData.find((item: any) => item.keyword === g.keyword);
-      if (!s) continue;
+      const s = serpMap.get(g.keyword) || null;
+      if (s) serpMatchCount++;
 
-      const competition_score = s.competition || 0.5;
-      const ctr_gap = (g.position < 3 ? 0.3 : 0.1) - g.ctr;
-      const opportunity_score = (1 - competition_score) * ((s.volume || 0) / 1000) * Math.max(0, ctr_gap);
-      const performance_drift = 0;
-      const long_tail_indicator = g.keyword.split(" ").length > 3 ? 1 : 0;
+      const position    = Number(g.position)    || 50;
+      const realCtr     = Number(g.ctr)         || 0;
+      const impressions = Number(g.impressions) || 0;
+      const clicks      = Number(g.clicks)      || 0;
+      const long_tail   = g.keyword.trim().split(/\s+/).length > 3 ? 1 : 0;
+
+      // Tous les KPIs calculés depuis GSC, SERP en bonus
+      const competition_score = computeCompetitionScore(g, s);
+      const ctr_gap           = computeCtrGap(position, realCtr);
+      const volume            = s ? Number(s.volume ?? 0) : 0;
+
+      const opportunity_score = computeOpportunityScore({
+        position, ctr: realCtr, impressions, ctr_gap,
+        competition_score, long_tail_indicator: long_tail,
+        clicks, volume,
+      });
+
+      // performance_drift = variation de position par rapport à J-1
+      // Positif = amélioration (position qui descend numériquement)
+      const prev = prevGscMap.get(g.keyword);
+      const performance_drift = prev
+        ? Number(prev.position) - position
+        : 0;
 
       results.push({
-        projectId,
-        keyword: g.keyword,
-        date,
-        competition_score,
-        opportunity_score,
-        ctr_gap,
-        performance_drift,
-        long_tail_indicator,
+        projectId, keyword: g.keyword, date: nd,
+        competition_score, opportunity_score,
+        ctr_gap, performance_drift,
+        long_tail_indicator: long_tail,
       });
     }
 
-    for (const item of results) {
-      await pool.query(
-        `
-        INSERT INTO scores_daily
-        (projectid, keyword, date, competition_score, opportunity_score, ctr_gap, performance_drift, long_tail_indicator)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT(projectid, keyword, date)
-        DO UPDATE SET
-          competition_score = EXCLUDED.competition_score,
-          opportunity_score = EXCLUDED.opportunity_score,
-          ctr_gap = EXCLUDED.ctr_gap,
-          performance_drift = EXCLUDED.performance_drift,
-          long_tail_indicator = EXCLUDED.long_tail_indicator
-        `,
-        [
-          item.projectId,
-          item.keyword,
-          item.date,
-          item.competition_score,
-          item.opportunity_score,
-          item.ctr_gap,
-          item.performance_drift,
-          item.long_tail_indicator,
-        ]
-      );
+    // Logs de contrôle
+    const nonZeroOpp  = results.filter((r) => r.opportunity_score  > 0).length;
+    const nonZeroComp = results.filter((r) => r.competition_score  > 0).length;
+    console.log(`[KPI] SERP enrichment : ${serpMatchCount}/${gscData.length} keywords enriched`);
+    console.log(`[KPI] non-zero opp    : ${nonZeroOpp}/${results.length}`);
+    console.log(`[KPI] non-zero comp   : ${nonZeroComp}/${results.length}`);
+    if (results.length > 0) {
+      const r = results[0];
+      console.log(`[KPI] Sample → keyword="${r.keyword}" opp=${r.opportunity_score} comp=${r.competition_score} gap=${r.ctr_gap} drift=${r.performance_drift}`);
     }
 
-    res.json({ success: true, count: results.length });
+    if (results.length === 0) return res.json({ success: true, count: 0 });
+
+    // Batch upsert
+    const values = results.flatMap((item) => [
+      item.projectId, item.keyword, item.date,
+      item.competition_score, item.opportunity_score,
+      item.ctr_gap, item.performance_drift, item.long_tail_indicator,
+    ]);
+    const placeholders = results
+      .map((_, i) => `($${i*8+1},$${i*8+2},$${i*8+3},$${i*8+4},$${i*8+5},$${i*8+6},$${i*8+7},$${i*8+8})`)
+      .join(",");
+
+    await pool.query(
+      `INSERT INTO scores_daily
+         (projectid,keyword,date,competition_score,opportunity_score,ctr_gap,performance_drift,long_tail_indicator)
+       VALUES ${placeholders}
+       ON CONFLICT (projectid,keyword,date) DO UPDATE SET
+         competition_score   = EXCLUDED.competition_score,
+         opportunity_score   = EXCLUDED.opportunity_score,
+         ctr_gap             = EXCLUDED.ctr_gap,
+         performance_drift   = EXCLUDED.performance_drift,
+         long_tail_indicator = EXCLUDED.long_tail_indicator`,
+      values
+    );
+
+    console.log(`[KPI] ✓ Upserted ${results.length} rows into scores_daily\n`);
+    res.json({
+      success: true,
+      count: results.length,
+      serpEnrichment: `${serpMatchCount}/${gscData.length}`,
+      nonZeroOpportunity: nonZeroOpp,
+    });
   } catch (err) {
-    console.error("Compute KPIs error:", err);
+    console.error("[KPI] ✗ Compute error:", err);
     res.status(500).json({ error: "Failed to compute KPIs" });
   }
 });
@@ -679,19 +945,19 @@ app.get("/api/projects/:projectId/dashboard-data", authenticate, async (req: any
       LEFT JOIN gsc_daily g
         ON k.projectid = g.projectid
        AND k.keyword = g.keyword
-       AND g.date = $1
+       AND LEFT(g.date::text,10) = $1
       LEFT JOIN serp_daily s
         ON k.projectid = s.projectid
        AND k.keyword = s.keyword
-       AND s.date = $1
+       AND LEFT(s.date::text,10) = $1
       LEFT JOIN scores_daily sc
         ON k.projectid = sc.projectid
        AND k.keyword = sc.keyword
-       AND sc.date = $1
+       AND LEFT(sc.date::text,10) = $1
       LEFT JOIN nlp_keyword_enrichment n
         ON k.projectid = n.projectid
        AND k.keyword = n.keyword
-       AND n.date = $1
+       AND LEFT(n.date::text,10) = $1
       WHERE k.projectid = $2
       ORDER BY COALESCE(sc.opportunity_score, 0) DESC, k.keyword ASC
       `,
@@ -750,19 +1016,19 @@ app.get("/api/projects/:projectId/keywords", authenticate, async (req: any, res)
     LEFT JOIN gsc_daily g
       ON k.projectid = g.projectid
      AND k.keyword = g.keyword
-     AND g.date = $1
+     AND LEFT(g.date::text,10) = $1
     LEFT JOIN serp_daily s
       ON k.projectid = s.projectid
      AND k.keyword = s.keyword
-     AND s.date = $2
+     AND LEFT(s.date::text,10) = $2
     LEFT JOIN scores_daily sc
       ON k.projectid = sc.projectid
      AND k.keyword = sc.keyword
-     AND sc.date = $3
+     AND LEFT(sc.date::text,10) = $3
     LEFT JOIN nlp_keyword_enrichment n
       ON k.projectid = n.projectid
      AND k.keyword = n.keyword
-     AND n.date = $4
+     AND LEFT(n.date::text,10) = $4
     WHERE k.projectid = $5
     ORDER BY k.id ASC
   `;
@@ -1053,7 +1319,8 @@ app.get("/api/opportunities", authenticate, async (req: any, res) => {
         ln.qualification_label,
         ln.priority_level,
         ln.action_hint,
-        ln.reasoning
+        ln.reasoning,
+        COALESCE(k.is_tracked, false) AS is_tracked
       FROM keywords k
       JOIN projects p ON p.id = k.projectid
       LEFT JOIN latest_gsc lg
@@ -1087,88 +1354,169 @@ app.get("/api/opportunities", authenticate, async (req: any, res) => {
 
 app.post("/api/nlp/qualify", authenticate, async (req: any, res) => {
   const { projectId, keywords, date } = req.body;
-
   if (!projectId || !keywords || !Array.isArray(keywords)) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
-  const prompt = `Tu es le module "ML & NLP Intelligence" d’une plateforme SaaS SEO.
-Analyse et enrichis les mots-clés suivants pour la qualification automatique.
+  console.log(`\n[NLP] \u25b6 qualify ${keywords.length} keywords for project ${projectId}`);
 
-Données (JSON): ${JSON.stringify(keywords)}
-
-Ta mission :
-1) Qualification multi-dimension :
-   - branded_status: branded|non_branded
-   - stability_status: stable|opportunity
-   - tail_type: long_tail|generic
-   - search_intent: informationnelle|transactionnelle|navigationnelle
-
-2) Filtrage stratégique :
-   - exclude_from_opportunity: true si branded ET stable, sinon false
-
-3) Sortie :
-   - qualification_label
-   - priority_level (low|medium|high)
-   - action_hint
-   - kpi_interpretation (objet simple avec 3 à 5 clés max)
-   - reasoning
-
-RETOURNE UNIQUEMENT UN TABLEAU JSON avec ces clés :
-keyword, branded_status, stability_status, tail_type, search_intent, exclude_from_opportunity, qualification_label, priority_level, action_hint, kpi_interpretation, reasoning`;
-
+  // Branded keywords du projet pour la détection locale
+  let brandedKeywords: string[] = [];
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: prompt,
-      config: { responseMimeType: "application/json" },
-    });
+    const projRes = await pool.query("SELECT branded_keywords FROM projects WHERE id=$1", [projectId]);
+    if (projRes.rows[0]?.branded_keywords) {
+      brandedKeywords = String(projRes.rows[0].branded_keywords)
+        .split(/[,\n]/).map((k: string) => k.trim()).filter(Boolean);
+    }
+  } catch (_) {}
 
-    const results = JSON.parse(response.text || "[]");
+  // Étape 1 — classification par règles locales (instantané, sans LLM)
+  // FIX: garantit la diversité des intents même si le LLM échoue
+  const ruleResults = keywords.map((item: any) => ({
+    ...item,
+    ...classifyByRules(item.keyword || "", brandedKeywords),
+  }));
 
-    for (const item of results) {
+  // Étape 2 — enrichissement LLM pour les keywords à faible confiance uniquement
+  const lowConf = ruleResults.filter((r: any) => r.confidence === "low");
+  console.log(`[NLP] Rules: ${ruleResults.length - lowConf.length} high/med, ${lowConf.length} low → LLM`);
+
+  const llmMap = new Map<string, any>();
+
+  if (lowConf.length > 0) {
+    try {
+      const prompt = `Tu es un expert NLP SEO. Analyse ces mots-clés et retourne leur classification.
+
+Données (JSON): ${JSON.stringify(lowConf.map((r: any) => ({
+        keyword: r.keyword,
+        position: r.position || 0,
+        ctr: r.ctr || 0,
+        cpc: r.cpc || 0,
+        volume: r.volume || 0,
+        opportunity_score: r.opportunity_score || 0,
+      })))}
+
+RÈGLES :
+search_intent — UN seul parmi :
+  "transactionnelle" → acheter, prix, devis, commander, tarif, promo, pas cher, livraison, abonnement
+  "navigationnelle"  → accès direct à un site/marque, connexion, login, espace client
+  "informationnelle" → apprendre, comprendre, guide, comment, pourquoi, définition
+
+branded_status : "branded" si nom de marque, sinon "non_branded"
+stability_status : "stable" si position<=10 ET ctr>0.05, sinon "opportunity"
+priority_level : "high" si opp_score>0.5 ou (pos 4-15 et vol>500), "medium" si 0.1-0.5, "low" sinon
+qualification_label : phrase courte (ex: "Opportunité long-tail commerciale")
+action_hint : action SEO concrète (ex: "Optimiser le titre avec le mot prix")
+reasoning : 1-2 phrases max
+
+RETOURNE UNIQUEMENT ce tableau JSON valide :
+[{"keyword","search_intent","branded_status","stability_status","priority_level","qualification_label","action_hint","reasoning"}]`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+        config: { responseMimeType: "application/json" },
+      });
+
+      let rawText = (response.text || "[]").trim()
+        .replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
+
+      const parsed = JSON.parse(rawText);
+      if (Array.isArray(parsed)) {
+        parsed.forEach((item: any) => { if (item.keyword) llmMap.set(item.keyword, item); });
+        console.log(`[NLP] LLM enriched ${llmMap.size}/${lowConf.length}`);
+      }
+    } catch (llmErr) {
+      console.error("[NLP] LLM failed, using rules only:", llmErr);
+    }
+  }
+
+  // Étape 3 — fusion règles + LLM
+  const VALID_INTENTS   = ["informationnelle","transactionnelle","navigationnelle"];
+  const VALID_BRANDED   = ["branded","non_branded"];
+  const VALID_STABILITY = ["stable","opportunity"];
+  const VALID_PRIORITY  = ["low","medium","high"];
+
+  const finalResults = ruleResults.map((ruleItem: any) => {
+    const llm = llmMap.get(ruleItem.keyword);
+    const search_intent = llm && VALID_INTENTS.includes(llm.search_intent)
+      ? llm.search_intent : ruleItem.search_intent;
+    const branded_status = llm && VALID_BRANDED.includes(llm.branded_status)
+      ? llm.branded_status : ruleItem.branded_status;
+    const stability = llm && VALID_STABILITY.includes(llm.stability_status)
+      ? llm.stability_status
+      : (Number(ruleItem.position||50) > 10 || Number(ruleItem.ctr||0) <= 0.05 ? "opportunity" : "stable");
+    const priority = llm && VALID_PRIORITY.includes(llm.priority_level)
+      ? llm.priority_level
+      : (Number(ruleItem.opportunity_score||0) > 0.5 ? "high"
+         : Number(ruleItem.opportunity_score||0) > 0.1 ? "medium" : "low");
+    const words = (ruleItem.keyword||"").trim().split(/\s+/).length;
+    const tail_type = words >= 4 ? "long_tail" : "generic";
+    const exclude_from_opportunity = branded_status === "branded" && stability === "stable";
+
+    console.log(`[NLP] "${ruleItem.keyword}" → intent=${search_intent} branded=${branded_status} priority=${priority}`);
+
+    return {
+      keyword: ruleItem.keyword,
+      search_intent, branded_status,
+      stability_status: stability,
+      tail_type, exclude_from_opportunity,
+      priority_level: priority,
+      qualification_label: llm?.qualification_label || `${search_intent} / ${tail_type}`,
+      action_hint: llm?.action_hint || "Analyser et optimiser le contenu existant",
+      reasoning: llm?.reasoning || `Classifié par règles (confidence: ${ruleItem.confidence})`,
+      kpi_interpretation: {
+        search_intent: `Intent: ${search_intent}${llm ? " (LLM)" : " (règles)"}`,
+        branded: `Branded: ${branded_status}`,
+        tail: `Type: ${tail_type} (${words} mots)`,
+      },
+    };
+  });
+
+  // Étape 4 — upsert en base
+  const today = normalizeDate(date || new Date().toISOString());
+  let savedCount = 0;
+
+  for (const item of finalResults) {
+    try {
       await pool.query(
-        `
-        INSERT INTO nlp_keyword_enrichment (
-          projectid, keyword, date, branded_status, stability_status, tail_type,
-          search_intent, exclude_from_opportunity, qualification_label, priority_level,
-          action_hint, reasoning
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        ON CONFLICT(projectid, keyword, date)
-        DO UPDATE SET
-          branded_status = EXCLUDED.branded_status,
-          stability_status = EXCLUDED.stability_status,
-          tail_type = EXCLUDED.tail_type,
-          search_intent = EXCLUDED.search_intent,
-          exclude_from_opportunity = EXCLUDED.exclude_from_opportunity,
-          qualification_label = EXCLUDED.qualification_label,
-          priority_level = EXCLUDED.priority_level,
-          action_hint = EXCLUDED.action_hint,
-          reasoning = EXCLUDED.reasoning
-        `,
+        `INSERT INTO nlp_keyword_enrichment
+           (projectid,keyword,date,branded_status,stability_status,tail_type,
+            search_intent,exclude_from_opportunity,qualification_label,priority_level,
+            action_hint,reasoning)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         ON CONFLICT(projectid,keyword,date) DO UPDATE SET
+           branded_status=EXCLUDED.branded_status,
+           stability_status=EXCLUDED.stability_status,
+           tail_type=EXCLUDED.tail_type,
+           search_intent=EXCLUDED.search_intent,
+           exclude_from_opportunity=EXCLUDED.exclude_from_opportunity,
+           qualification_label=EXCLUDED.qualification_label,
+           priority_level=EXCLUDED.priority_level,
+           action_hint=EXCLUDED.action_hint,
+           reasoning=EXCLUDED.reasoning`,
         [
-          projectId,
-          item.keyword,
-          date,
-          item.branded_status,
-          item.stability_status,
-          item.tail_type,
-          item.search_intent,
-          item.exclude_from_opportunity ? true : false,
-          item.qualification_label,
-          item.priority_level,
+          projectId, item.keyword, today,
+          item.branded_status, item.stability_status, item.tail_type,
+          item.search_intent, item.exclude_from_opportunity,
+          item.qualification_label, item.priority_level,
           item.action_hint,
-          JSON.stringify({ ...(item.kpi_interpretation || {}), reasoning: item.reasoning || "" }),
+          JSON.stringify({ ...item.kpi_interpretation, reasoning: item.reasoning }),
         ]
       );
+      savedCount++;
+    } catch (dbErr) {
+      console.error(`[NLP] DB error for "${item.keyword}":`, dbErr);
     }
-
-    res.json({ success: true, results });
-  } catch (err) {
-    console.error("NLP Qualify error:", err);
-    res.status(500).json({ error: "Failed to qualify keywords" });
   }
+
+  const intentDist = finalResults.reduce((acc: any, r) => {
+    acc[r.search_intent] = (acc[r.search_intent] || 0) + 1;
+    return acc;
+  }, {});
+  console.log(`[NLP] \u2713 Saved ${savedCount}/${finalResults.length} | Distribution:`, intentDist);
+
+  res.json({ success: true, results: finalResults, intentDistribution: intentDist });
 });
 
 app.post("/api/nlp/save-enrichment", authenticate, async (req: any, res) => {
@@ -1391,6 +1739,260 @@ RETOURNE UNIQUEMENT UN TABLEAU JSON d'objets avec ces clés: title, description,
   } catch (err) {
     console.error("Action Plan error:", err);
     res.status(500).json({ error: "Failed to generate action plan" });
+  }
+});
+
+// ── Keyword Track / Untrack ───────────────────────────────────────────────
+// These routes were called by Opportunities.tsx but didn't exist in the backend.
+// They toggle the is_tracked boolean on the keywords table.
+
+app.post("/api/keywords/:keywordId/track", authenticate, async (req: any, res) => {
+  const { keywordId } = req.params;
+  try {
+    // Verify ownership via project join
+    const check = await pool.query(
+      `SELECT k.id FROM keywords k
+       JOIN projects p ON p.id = k.projectid
+       WHERE k.id = $1 AND p.userid = $2`,
+      [keywordId, req.user.id]
+    );
+    if (check.rows.length === 0) {
+      return res.status(404).json({ error: "Keyword not found" });
+    }
+    await pool.query(
+      "UPDATE keywords SET is_tracked = TRUE WHERE id = $1",
+      [keywordId]
+    );
+    res.json({ success: true, is_tracked: true });
+  } catch (err) {
+    console.error("Track keyword error:", err);
+    res.status(500).json({ error: "Failed to track keyword" });
+  }
+});
+
+app.post("/api/keywords/:keywordId/untrack", authenticate, async (req: any, res) => {
+  const { keywordId } = req.params;
+  try {
+    const check = await pool.query(
+      `SELECT k.id FROM keywords k
+       JOIN projects p ON p.id = k.projectid
+       WHERE k.id = $1 AND p.userid = $2`,
+      [keywordId, req.user.id]
+    );
+    if (check.rows.length === 0) {
+      return res.status(404).json({ error: "Keyword not found" });
+    }
+    await pool.query(
+      "UPDATE keywords SET is_tracked = FALSE WHERE id = $1",
+      [keywordId]
+    );
+    res.json({ success: true, is_tracked: false });
+  } catch (err) {
+    console.error("Untrack keyword error:", err);
+    res.status(500).json({ error: "Failed to untrack keyword" });
+  }
+});
+
+// ── Opportunities Reset (triggers n8n workflow) ────────────────────────────
+// Was called by resetFilters() in Opportunities.tsx but didn't exist.
+// Delegates to the generic n8n trigger route internally.
+
+app.post("/api/opportunities/reset", authenticate, async (req: any, res) => {
+  const N8N_BASE_URL = process.env.N8N_BASE_URL || "https://n8n.srv770401.hstgr.cloud";
+  const webhookUrl = `${N8N_BASE_URL}/webhook/reset-collecte`;
+
+  try {
+    const n8nResponse = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        triggeredBy: req.user?.email || "unknown",
+        projectId: req.body?.projectId || null,
+        timestamp: new Date().toISOString(),
+      }),
+    });
+
+    const responseText = await n8nResponse.text();
+
+    if (!n8nResponse.ok) {
+      console.error("n8n reset-collecte error:", n8nResponse.status, responseText);
+      let userMessage: string;
+      if (n8nResponse.status === 404) {
+        userMessage = `Workflow "reset-collecte" introuvable dans n8n. Vérifiez que le workflow est ACTIF (toggle vert dans l'éditeur n8n) et que le chemin du webhook est exactement "reset-collecte".`;
+      } else {
+        userMessage = `Erreur n8n (${n8nResponse.status}). Vérifiez les logs n8n.`;
+      }
+      return res.status(502).json({ error: userMessage, details: responseText.slice(0, 300) });
+    }
+
+    let result: any = { success: true };
+    try { result = JSON.parse(responseText); } catch {}
+    res.json({ success: true, result });
+
+  } catch (err: any) {
+    console.error("opportunities/reset network error:", err);
+    const isDown = err.code === "ECONNREFUSED" || err.message?.includes("ECONNREFUSED");
+    res.status(500).json({
+      error: isDown
+        ? `Impossible de contacter n8n sur ${N8N_BASE_URL}. Vérifiez que n8n est démarré.`
+        : `Erreur réseau: ${err.message}`,
+    });
+  }
+});
+
+// ── n8n Workflow Trigger ───────────────────────────────────────────────────
+// FIX: This endpoint was missing entirely — the frontend had no way to trigger
+// n8n workflows. The error "webhook not registered / 404" was caused by:
+//   1. No backend proxy route existed
+//   2. Using /webhook-test/ (test URL) instead of /webhook/ (production URL)
+//   3. The n8n workflow was inactive
+//
+// Usage from frontend: POST /api/n8n/trigger/reset-collecte
+// Make sure N8N_BASE_URL is in .env and the n8n workflow is ACTIVE.
+
+app.post("/api/n8n/trigger/:workflowName", authenticate, async (req: any, res) => {
+  const { workflowName } = req.params;
+  const N8N_BASE_URL = process.env.N8N_BASE_URL || "https://n8n.srv770401.hstgr.cloud";
+
+  // IMPORTANT: /webhook/ = production (workflow must be ACTIVE)
+  //            /webhook-test/ = only works while workflow is open in editor
+  const webhookUrl = `${N8N_BASE_URL}/webhook/${workflowName}`;
+
+  try {
+    const n8nResponse = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        triggeredBy: req.user?.email || "unknown",
+        timestamp: new Date().toISOString(),
+        ...req.body,
+      }),
+    });
+
+    const responseText = await n8nResponse.text();
+
+    if (!n8nResponse.ok) {
+      console.error(`n8n webhook error [${workflowName}] HTTP ${n8nResponse.status}:`, responseText);
+
+      // Provide a clear, actionable error message to the frontend
+      let userMessage: string;
+      if (n8nResponse.status === 404) {
+        userMessage = `Workflow "${workflowName}" introuvable dans n8n. Vérifiez que (1) le nom du webhook est exactement "${workflowName}", (2) le workflow est ACTIF (toggle vert dans l'éditeur n8n).`;
+      } else if (n8nResponse.status >= 500) {
+        userMessage = `Erreur interne n8n (${n8nResponse.status}). Vérifiez les logs n8n.`;
+      } else {
+        userMessage = `n8n a retourné une erreur (${n8nResponse.status}).`;
+      }
+
+      return res.status(502).json({
+        error: userMessage,
+        status: n8nResponse.status,
+        details: responseText.slice(0, 500),
+      });
+    }
+
+    // Try to parse JSON response, fall back to raw text
+    let result: any = { success: true };
+    try { result = JSON.parse(responseText); } catch {}
+
+    res.json({ success: true, result });
+  } catch (err: any) {
+    console.error("n8n trigger network error:", err);
+
+    const isConnectionRefused = err.code === "ECONNREFUSED" || err.message?.includes("ECONNREFUSED");
+    res.status(500).json({
+      error: isConnectionRefused
+        ? `Impossible de contacter n8n sur ${N8N_BASE_URL}. Vérifiez que n8n est démarré et que N8N_BASE_URL est correct dans .env.`
+        : `Erreur réseau lors du déclenchement du workflow: ${err.message}`,
+      details: err.message,
+    });
+  }
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEBUG — GET /api/debug/data-check?projectId=1&date=2024-03-15
+// Appelle depuis Postman pour diagnostiquer les données en temps réel
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get("/api/debug/data-check", authenticate, async (req: any, res) => {
+  const { projectId, date } = req.query;
+  if (!projectId) return res.status(400).json({ error: "projectId required" });
+  const nd = date ? normalizeDate(date) : null;
+  try {
+    const [gscCount, serpCount, scoresCount, nlpCount] = await Promise.all([
+      pool.query(`SELECT COUNT(*) AS n, MAX(LEFT(date::text,10)) AS latest FROM gsc_daily WHERE projectid=$1`, [projectId]),
+      pool.query(`SELECT COUNT(*) AS n, MAX(LEFT(date::text,10)) AS latest,
+                         COUNT(CASE WHEN volume>0 THEN 1 END) AS with_volume,
+                         COUNT(CASE WHEN competition>0 THEN 1 END) AS with_competition
+                  FROM serp_daily WHERE projectid=$1`, [projectId]),
+      pool.query(`SELECT COUNT(*) AS n,
+                         COUNT(CASE WHEN opportunity_score>0 THEN 1 END) AS non_zero_opp,
+                         ROUND(AVG(opportunity_score)::numeric,4) AS avg_opp,
+                         ROUND(AVG(competition_score)::numeric,4) AS avg_comp
+                  FROM scores_daily WHERE projectid=$1`, [projectId]),
+      pool.query(`SELECT search_intent, COUNT(*) AS n FROM nlp_keyword_enrichment WHERE projectid=$1 GROUP BY search_intent`, [projectId]),
+    ]);
+    const targetDate = nd || gscCount.rows[0]?.latest;
+    let joinCheck: any = null;
+    let sample: any = null;
+    if (targetDate) {
+      const jRes = await pool.query(
+        `SELECT COUNT(g.keyword) AS gsc_keywords, COUNT(s.keyword) AS serp_matched,
+                COUNT(CASE WHEN s.volume>0 THEN 1 END) AS with_volume,
+                COUNT(CASE WHEN s.competition>0 THEN 1 END) AS with_competition
+         FROM gsc_daily g
+         LEFT JOIN serp_daily s ON g.projectid=s.projectid AND g.keyword=s.keyword
+           AND LEFT(g.date::text,10)=LEFT(s.date::text,10)
+         WHERE g.projectid=$1 AND LEFT(g.date::text,10)=$2`,
+        [projectId, targetDate]
+      );
+      joinCheck = jRes.rows[0];
+      const sRes = await pool.query(
+        `SELECT g.keyword, g.position, g.ctr, g.impressions,
+                s.volume, s.competition, s.paa_count, s.ai_overview_present,
+                sc.opportunity_score, sc.competition_score, sc.ctr_gap,
+                n.search_intent, n.branded_status
+         FROM gsc_daily g
+         LEFT JOIN serp_daily s ON g.projectid=s.projectid AND g.keyword=s.keyword AND LEFT(s.date::text,10)=$2
+         LEFT JOIN scores_daily sc ON g.projectid=sc.projectid AND g.keyword=sc.keyword AND LEFT(sc.date::text,10)=$2
+         LEFT JOIN nlp_keyword_enrichment n ON g.projectid=n.projectid AND g.keyword=n.keyword
+         WHERE g.projectid=$1 AND LEFT(g.date::text,10)=$2 LIMIT 5`,
+        [projectId, targetDate]
+      );
+      sample = sRes.rows;
+    }
+    const issues: string[] = [];
+    if (Number(gscCount.rows[0]?.n) === 0) issues.push("\u274c gsc_daily vide — le workflow n8n n\'a pas ingéré les données GSC");
+    if (Number(serpCount.rows[0]?.n) === 0) issues.push("\u274c serp_daily vide — le workflow n8n n\'a pas ingéré les données SERP");
+    if (Number(serpCount.rows[0]?.with_volume) === 0) issues.push("\u26a0 serp_daily: aucun volume > 0 — le scraper ne récupère pas le volume");
+    if (Number(serpCount.rows[0]?.with_competition) === 0) issues.push("\u26a0 serp_daily: aucune competition > 0 — vérifier le payload SERP");
+    if (joinCheck && Number(joinCheck.serp_matched) === 0 && Number(joinCheck.gsc_keywords) > 0)
+      issues.push("\u26a0 JOIN GSC\u2194SERP: 0 match — keywords ou formats de date différents");
+    if (Number(scoresCount.rows[0]?.non_zero_opp) === 0 && Number(scoresCount.rows[0]?.n) > 0)
+      issues.push("\u26a0 scores_daily: tous opportunity_score=0 — relancer /api/compute/kpis");
+    if (nlpCount.rows.length === 1) issues.push("\u26a0 NLP: un seul type d\'intent — classification non diversifiée");
+    if (issues.length === 0) issues.push("\u2705 Aucun problème détecté");
+    res.json({
+      projectId, checkedDate: targetDate,
+      tables: {
+        gsc_daily:    { total: Number(gscCount.rows[0]?.n), latestDate: gscCount.rows[0]?.latest },
+        serp_daily:   { total: Number(serpCount.rows[0]?.n), latestDate: serpCount.rows[0]?.latest,
+                        withVolume: Number(serpCount.rows[0]?.with_volume), withCompetition: Number(serpCount.rows[0]?.with_competition) },
+        scores_daily: { total: Number(scoresCount.rows[0]?.n), nonZeroOpportunity: Number(scoresCount.rows[0]?.non_zero_opp),
+                        avgOpportunityScore: Number(scoresCount.rows[0]?.avg_opp), avgCompetitionScore: Number(scoresCount.rows[0]?.avg_comp) },
+        nlp_enrichment: { intentDistribution: nlpCount.rows },
+      },
+      joinCheck: joinCheck ? {
+        gscKeywords: Number(joinCheck.gsc_keywords), serpMatched: Number(joinCheck.serp_matched),
+        matchRate: Number(joinCheck.gsc_keywords) > 0 ? `${Math.round((joinCheck.serp_matched/joinCheck.gsc_keywords)*100)}%` : "0%",
+        withVolume: Number(joinCheck.with_volume), withCompetition: Number(joinCheck.with_competition),
+      } : null,
+      sample, issues,
+    });
+  } catch (err) {
+    console.error("[DEBUG] data-check error:", err);
+    res.status(500).json({ error: "Debug check failed", details: String(err) });
   }
 });
 
