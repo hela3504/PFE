@@ -3,14 +3,15 @@ import json
 import jwt
 from datetime import datetime, timedelta
 from typing import List, Optional
-from sqlalchemy import Date, DateTime, create_engine, Column, Integer, String, Float, Boolean, ForeignKey, UniqueConstraint, and_, select
+from sqlalchemy import BigInteger, Date, DateTime, create_engine, Column, Integer, String, Float, Boolean, ForeignKey, UniqueConstraint, and_, select, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from google import genai
 from google.genai import types
 from passlib.context import CryptContext
-
+ 
 # Configuration
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -63,29 +64,61 @@ class GSCDaily(Base):
     )
 
 class SERPDaily(Base):
+    """serp_daily v2 — voir migrations/serp_daily_v2.sql.
+
+    SerpAPI ne renvoie pas volume/cpc/competition, donc on les a sortis du schéma.
+    Les listes (organic_results, paa, related_searches, ai_overview, knowledge_graph)
+    sont stockées en JSONB. raw_response conserve le payload SerpAPI brut.
+    """
     __tablename__ = "serp_daily"
     __table_args__ = (
-        UniqueConstraint("projectid", "keyword", "date", name="serp_daily_project_keyword_date_key"),
+        UniqueConstraint("projectid", "keyword", "date", "device", name="serp_daily_unique"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     projectid = Column(Integer, ForeignKey("projects.id"), index=True)
     keyword = Column(String, index=True)
-    date = Column(String, index=True)  # TEXT in server.ts
-    position = Column(Integer)
-    competition = Column(Float)
-    volume = Column(Integer)
-    cpc = Column(Float)
-    serp_result_count = Column(Integer, default=0)
-    serp_top1_title = Column(String)
-    serp_top1_link = Column(String)
-    serp_top3_links = Column(String)
-    serp_top3_domains = Column(String)
-    paa_count = Column(Integer, default=0)
-    paa_questions_newline = Column(String)
-    ai_overview_present = Column(Boolean, default=False)
-    ai_overview_text = Column(String)
-    top_organic_urls = Column(String)
+    date = Column(Date, index=True)
+
+    # Search context (depuis SerpAPI search_parameters)
+    device = Column(String, nullable=False, default="desktop")
+    gl = Column(String)
+    hl = Column(String)
+    engine = Column(String, nullable=False, default="google")
+
+    # Notre position dans la SERP
+    your_position = Column(Integer)
+    your_url = Column(String)
+    your_title = Column(String)
+    your_snippet = Column(String)
+    your_in_aio = Column(Boolean, nullable=False, default=False)
+
+    # SERP features
+    has_ai_overview = Column(Boolean, nullable=False, default=False)
+    has_paa = Column(Boolean, nullable=False, default=False)
+    has_knowledge_graph = Column(Boolean, nullable=False, default=False)
+    has_inline_videos = Column(Boolean, nullable=False, default=False)
+    has_inline_images = Column(Boolean, nullable=False, default=False)
+    has_sitelinks = Column(Boolean, nullable=False, default=False)
+    has_rich_snippets = Column(Boolean, nullable=False, default=False)
+
+    # Compteurs rapides
+    total_results = Column(BigInteger)
+    organic_count = Column(Integer, nullable=False, default=0)
+    paa_count = Column(Integer, nullable=False, default=0)
+
+    # Données structurées (JSONB)
+    organic_results = Column(JSONB, nullable=False, default=list)
+    paa_questions = Column(JSONB, nullable=False, default=list)
+    related_searches = Column(JSONB, nullable=False, default=list)
+    ai_overview = Column(JSONB)
+    knowledge_graph = Column(JSONB)
+    raw_response = Column(JSONB)
+
+    error = Column(String)
+    scraped_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 class ScoresDaily(Base):
     __tablename__ = "scores_daily"
@@ -188,51 +221,154 @@ def ingest_gsc(project_id: int, data: List[dict]):
     finally:
         db.close()
 
-def ingest_serp(project_id: int, data: List[dict]):
+def _extract_domain(url):
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+        return host.lower().lstrip("www.") if host else None
+    except Exception:
+        return None
+
+
+def _transform_organic(arr):
+    out = []
+    for r in (arr or []):
+        sl = r.get("sitelinks") or {}
+        sitelinks = sl.get("inline") if isinstance(sl, dict) else (sl if isinstance(sl, list) else [])
+        out.append({
+            "position": r.get("position"),
+            "title": r.get("title"),
+            "link": r.get("link"),
+            "displayed_link": r.get("displayed_link"),
+            "domain": _extract_domain(r.get("link")),
+            "snippet": r.get("snippet"),
+            "sitelinks": sitelinks or [],
+            "rich_snippet": r.get("rich_snippet"),
+        })
+    return out
+
+
+def _find_your_position(organic, project_domain):
+    if not project_domain:
+        return {"position": None, "url": None, "title": None, "snippet": None}
+    for r in organic:
+        d = r.get("domain") or _extract_domain(r.get("link"))
+        if d and (d == project_domain or d.endswith("." + project_domain)):
+            return {"position": r.get("position"), "url": r.get("link"), "title": r.get("title"), "snippet": r.get("snippet")}
+    return {"position": None, "url": None, "title": None, "snippet": None}
+
+
+def ingest_serp(project_id: int, items: List[dict]):
+    """Ingest raw SerpAPI items (v2 shape).
+
+    Chaque item doit avoir au minimum search_parameters.q. Le payload SerpAPI
+    brut est conservé dans raw_response. Aligné avec /api/ingest/serp dans
+    server.ts (cf. migrations/serp_daily_v2.sql).
+    """
     db = SessionLocal()
     try:
-        for item in data:
+        proj = db.query(Project).filter(Project.id == project_id).first()
+        project_domain = _extract_domain(proj.domain) if proj and proj.domain else None
+
+        for item in items:
+            sp = item.get("search_parameters") or {}
+            keyword = sp.get("q")
+            if not keyword:
+                continue
+
+            created_at = (item.get("search_metadata") or {}).get("created_at")
+            d = datetime.utcnow().date()
+            if created_at:
+                try:
+                    d = datetime.strptime(created_at[:10], "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+
+            organic = _transform_organic(item.get("organic_results"))
+            paa = [
+                {"question": q.get("question"), "snippet": q.get("snippet"),
+                 "title": q.get("title"), "link": q.get("link")}
+                for q in (item.get("related_questions") or [])
+            ]
+            related = [
+                {"query": r.get("query") or r.get("text"), "link": r.get("link")}
+                for r in (item.get("related_searches") or [])
+            ]
+            aio = item.get("ai_overview")
+            yours = _find_your_position(organic, project_domain)
+
+            has_inline_videos = bool(item.get("inline_videos")) or bool(item.get("short_videos"))
+            has_sitelinks = any(isinstance(r.get("sitelinks"), list) and r["sitelinks"] for r in organic)
+            has_rich_snippets = any(r.get("rich_snippet") for r in organic)
+
             stmt = pg_insert(SERPDaily).values(
-                projectId=project_id,
-                keyword=item["keyword"],
-                date=item["date"],
-                position=item.get("position", 0),
-                competition=item.get("competition", 0),
-                volume=item.get("volume", 0),
-                cpc=item.get("cpc", 0.0),
-                serp_result_count=item.get("serp_result_count", 0),
-                serp_top1_title=item.get("serp_top1_title", ""),
-                serp_top1_link=item.get("serp_top1_link", ""),
-                serp_top3_links=item.get("serp_top3_links", ""),
-                serp_top3_domains=item.get("serp_top3_domains", ""),
-                paa_count=item.get("paa_count", 0),
-                paa_questions_newline=item.get("paa_questions_newline", ""),
-                ai_overview_present=item.get("ai_overview_present", False),
-                ai_overview_text=item.get("ai_overview_text", ""),
-                top_organic_urls=item.get("top_organic_urls", ""),
+                projectid=project_id,
+                keyword=keyword,
+                date=d,
+                device=(sp.get("device") or "desktop").lower(),
+                gl=sp.get("gl"),
+                hl=sp.get("hl"),
+                engine=sp.get("engine") or "google",
+                your_position=yours["position"],
+                your_url=yours["url"],
+                your_title=yours["title"],
+                your_snippet=yours["snippet"],
+                your_in_aio=False,
+                has_ai_overview=bool(aio),
+                has_paa=len(paa) > 0,
+                has_knowledge_graph=bool(item.get("knowledge_graph")),
+                has_inline_videos=has_inline_videos,
+                has_inline_images=bool(item.get("inline_images")),
+                has_sitelinks=has_sitelinks,
+                has_rich_snippets=has_rich_snippets,
+                total_results=(item.get("search_information") or {}).get("total_results"),
+                organic_count=len(organic),
+                paa_count=len(paa),
+                organic_results=organic,
+                paa_questions=paa,
+                related_searches=related,
+                ai_overview=aio,
+                knowledge_graph=item.get("knowledge_graph"),
+                raw_response=item,
+                error=item.get("error"),
+                scraped_at=datetime.strptime(created_at[:19], "%Y-%m-%d %H:%M:%S") if created_at else None,
             )
             stmt = stmt.on_conflict_do_update(
                 constraint="serp_daily_unique",
                 set_={
-                    "position": stmt.excluded.position,
-                    "competition": stmt.excluded.competition,
-                    "volume": stmt.excluded.volume,
-                    "cpc": stmt.excluded.cpc,
-                    "serp_result_count": stmt.excluded.serp_result_count,
-                    "serp_top1_title": stmt.excluded.serp_top1_title,
-                    "serp_top1_link": stmt.excluded.serp_top1_link,
-                    "serp_top3_links": stmt.excluded.serp_top3_links,
-                    "serp_top3_domains": stmt.excluded.serp_top3_domains,
+                    "gl": stmt.excluded.gl,
+                    "hl": stmt.excluded.hl,
+                    "engine": stmt.excluded.engine,
+                    "your_position": stmt.excluded.your_position,
+                    "your_url": stmt.excluded.your_url,
+                    "your_title": stmt.excluded.your_title,
+                    "your_snippet": stmt.excluded.your_snippet,
+                    "your_in_aio": stmt.excluded.your_in_aio,
+                    "has_ai_overview": stmt.excluded.has_ai_overview,
+                    "has_paa": stmt.excluded.has_paa,
+                    "has_knowledge_graph": stmt.excluded.has_knowledge_graph,
+                    "has_inline_videos": stmt.excluded.has_inline_videos,
+                    "has_inline_images": stmt.excluded.has_inline_images,
+                    "has_sitelinks": stmt.excluded.has_sitelinks,
+                    "has_rich_snippets": stmt.excluded.has_rich_snippets,
+                    "total_results": stmt.excluded.total_results,
+                    "organic_count": stmt.excluded.organic_count,
                     "paa_count": stmt.excluded.paa_count,
-                    "paa_questions_newline": stmt.excluded.paa_questions_newline,
-                    "ai_overview_present": stmt.excluded.ai_overview_present,
-                    "ai_overview_text": stmt.excluded.ai_overview_text,
-                    "top_organic_urls": stmt.excluded.top_organic_urls,
-                }
+                    "organic_results": stmt.excluded.organic_results,
+                    "paa_questions": stmt.excluded.paa_questions,
+                    "related_searches": stmt.excluded.related_searches,
+                    "ai_overview": stmt.excluded.ai_overview,
+                    "knowledge_graph": stmt.excluded.knowledge_graph,
+                    "raw_response": stmt.excluded.raw_response,
+                    "error": stmt.excluded.error,
+                    "scraped_at": stmt.excluded.scraped_at,
+                },
             )
             db.execute(stmt)
         db.commit()
-        return {"success": True, "count": len(data)}
+        return {"success": True, "count": len(items)}
     finally:
         db.close()
 
@@ -251,11 +387,29 @@ def compute_kpis(project_id: int, date: str):
         
         for g in gsc_data:
             s = serp_map.get(g.keyword)
-            
-            comp_score = s.competition if s else 0.5
-            vol = s.volume if s else 0
-            ctr_gap = (0.3 if g.position < 3 else 0.1) - g.ctr
-            opp_score = (1 - comp_score) * (vol / 1000) * max(0, ctr_gap)
+
+            # competition_score : estimé depuis la position GSC, enrichi par
+            # les SERP features (PAA, AI Overview, knowledge graph) — schéma v2,
+            # cf. computeCompetitionScore() dans server.ts.
+            pos = g.position or 50
+            base = max(0.0, min(1.0, 1 - (pos - 1) / 49))
+            if s:
+                if s.has_ai_overview:
+                    base = min(1.0, base + 0.10)
+                if (s.paa_count or 0) >= 4:
+                    base = min(1.0, base + 0.08)
+                elif (s.paa_count or 0) >= 2:
+                    base = min(1.0, base + 0.04)
+                if s.has_knowledge_graph:
+                    base = min(1.0, base + 0.05)
+            comp_score = round(base, 3)
+
+            # opportunity_score : impressions × gap CTR vers le top 3 (~11%),
+            # cf. computeOpportunityScore() dans server.ts.
+            imp = g.impressions or 0
+            ctr_gap = (0.3 if g.position < 3 else 0.1) - (g.ctr or 0)
+            gain = 0.11 - (g.ctr or 0)
+            opp_score = round(imp * gain, 1) if gain > 0 and imp > 0 else 0.0
             
             # Drift calculation
             prev_pos = yesterday_map.get(g.keyword)
@@ -462,7 +616,7 @@ FORMAT OBLIGATOIRE :
 """
 
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
@@ -643,7 +797,7 @@ FORMAT DE SORTIE OBLIGATOIRE :
 """
 
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"

@@ -1,0 +1,159 @@
+### POST /api/ingest/serp — manual tests
+### Format: REST Client (VS Code) / Thunder Client / IntelliJ HTTP Client
+### --------------------------------------------------------------------
+### Set these in your client's environment file or replace inline:
+@host    = http://localhost:3000
+@apiKey  = n8n-secret-key
+@projectId = 1
+
+
+### 1. Valid: 1 minimal SerpAPI item, no AI overview
+POST {{host}}/api/ingest/serp
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "projectId": {{projectId}},
+  "items": [
+    {
+      "search_metadata": { "created_at": "2026-05-08T10:00:00Z" },
+      "search_parameters": {
+        "engine": "google",
+        "q": "para tunisie",
+        "device": "desktop",
+        "gl": "tn",
+        "hl": "fr"
+      },
+      "search_information": { "total_results": 1230000 },
+      "organic_results": [
+        {
+          "position": 1,
+          "title": "Parapharmacie en ligne Tunisie",
+          "link": "https://www.paraexpert.tn/",
+          "snippet": "Vente de produits de parapharmacie...",
+          "sitelinks": { "inline": [{ "title": "Soldes", "link": "https://www.paraexpert.tn/soldes" }] }
+        },
+        {
+          "position": 2,
+          "title": "Parapharmacie tunisienne — autre site",
+          "link": "https://example-concurrent.tn/",
+          "snippet": "Concurrent direct..."
+        }
+      ],
+      "related_questions": [
+        { "question": "Quelle est la meilleure parapharmacie en Tunisie ?", "snippet": "..." }
+      ],
+      "related_searches": [
+        { "query": "parapharmacie tunis" },
+        { "query": "para en ligne tunisie" }
+      ]
+    }
+  ]
+}
+
+
+### 2. Valid: 1 item WITH AI overview citing our domain
+POST {{host}}/api/ingest/serp
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "projectId": {{projectId}},
+  "items": [
+    {
+      "search_metadata": { "created_at": "2026-05-08T10:05:00Z" },
+      "search_parameters": {
+        "engine": "google_ai_overview",
+        "q": "creme solaire bebe tunisie",
+        "device": "mobile",
+        "gl": "tn",
+        "hl": "fr"
+      },
+      "organic_results": [
+        {
+          "position": 4,
+          "title": "Crème solaire bébé — Paraexpert",
+          "link": "https://paraexpert.tn/cremes-solaires-bebe",
+          "snippet": "Sélection de crèmes solaires pour bébé..."
+        }
+      ],
+      "ai_overview": {
+        "text_blocks": [{ "type": "paragraph", "snippet": "Pour les bébés, privilégier..." }],
+        "references": [
+          { "title": "Paraexpert", "link": "https://paraexpert.tn/cremes-solaires-bebe", "source": "paraexpert.tn" },
+          { "title": "Doctissimo", "link": "https://www.doctissimo.fr/article", "source": "doctissimo.fr" }
+        ]
+      },
+      "knowledge_graph": { "title": "Crème solaire", "type": "Skin care product" },
+      "inline_videos": [{ "title": "Conseils crème solaire", "link": "https://youtube.com/x" }]
+    }
+  ]
+}
+
+
+### 3. Project not found (404)
+POST {{host}}/api/ingest/serp
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "projectId": 99999,
+  "items": [
+    {
+      "search_parameters": { "q": "test", "engine": "google" }
+    }
+  ]
+}
+
+
+### 4. Invalid body (400) — missing search_parameters
+POST {{host}}/api/ingest/serp
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "projectId": {{projectId}},
+  "items": [
+    { "organic_results": [] }
+  ]
+}
+
+
+### 5. Invalid body (400) — missing items
+POST {{host}}/api/ingest/serp
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{ "projectId": {{projectId}} }
+
+
+### 6. Item containing SerpAPI error — should NOT crash, should appear in errors[]
+###    (this still requires search_parameters to pass Zod, but the engine returned an error string)
+POST {{host}}/api/ingest/serp
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "projectId": {{projectId}},
+  "items": [
+    {
+      "search_parameters": { "q": "broken keyword", "engine": "google", "device": "desktop" },
+      "error": "SerpAPI rate limit reached"
+    },
+    {
+      "search_metadata": { "created_at": "2026-05-08T11:00:00Z" },
+      "search_parameters": { "q": "working keyword", "engine": "google", "device": "desktop", "gl": "tn", "hl": "fr" },
+      "organic_results": [
+        { "position": 1, "title": "x", "link": "https://paraexpert.tn/x" }
+      ]
+    }
+  ]
+}
+
+
+### 7. Wrong API key (401)
+POST {{host}}/api/ingest/serp
+Content-Type: application/json
+x-api-key: wrong-key
+
+{ "projectId": {{projectId}}, "items": [] }

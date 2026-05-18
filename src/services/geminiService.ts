@@ -1,48 +1,114 @@
-import { GoogleGenAI } from "@google/genai";
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const apiCall = async (path: string, body: object) => {
+  const token = localStorage.getItem("token");
+  const res = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+};
 
 export async function getDashboardInterpretation(stats: any, keywords: any[]) {
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: `Analyze the following SEO data and provide a concise, professional interpretation (in French). 
-      Stats: ${JSON.stringify(stats)}
-      Top Keywords: ${JSON.stringify(keywords.slice(0, 5))}
-      
-      Focus on:
-      1. Overall performance trend.
-      2. Specific areas of concern (e.g., high competition, low CTR).
-      3. One actionable recommendation.
-      
-      Format the response as a short paragraph followed by 3 bullet points.`,
-      config: {
-        systemInstruction: "Tu es un expert en SEO et Business Intelligence. Tu fournis des analyses précises et exploitables.",
-      },
-    });
-    return response.text;
-  } catch (error) {
-    console.error("Gemini Error:", error);
-    return "Désolé, l'interprétation IA n'est pas disponible pour le moment.";
+    const data = await apiCall("/api/ai/dashboard-interpretation", { stats, keywords });
+    return data.text as string;
+  } catch (error: any) {
+    console.error("Interpretation error:", error);
+    return error?.message || "Désolé, l'interprétation IA n'est pas disponible pour le moment.";
   }
 }
 
-export async function getSeasonalSuggestions(domain: string = "Général", location: string = "France") {
+export type AssistantMessage = { role: "user" | "assistant"; content: string };
+
+export type StreamAssistantArgs = {
+  messages: AssistantMessage[];
+  useProjectContext?: boolean;
+  projectId?: number | null;
+  onDelta: (delta: string) => void;
+  onDone?: () => void;
+  onError?: (message: string) => void;
+  signal?: AbortSignal;
+};
+
+// Streams the conversational SEO assistant via SSE. The backend writes
+// "data: {\"delta\": \"...\"}\n\n" frames followed by "data: [DONE]\n\n".
+// We accumulate bytes, split on the SSE record separator, parse each frame
+// and forward deltas to the caller — keeping React state cheap.
+export async function streamAssistant({
+  messages,
+  useProjectContext = false,
+  projectId = null,
+  onDelta,
+  onDone,
+  onError,
+  signal,
+}: StreamAssistantArgs) {
+  const token = localStorage.getItem("token");
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: `Quels sont les prochains événements saisonniers majeurs (ex: Soldes, Black Friday, Vacances d'été, fêtes religieuses ou nationales) à venir dans les 3 prochains mois pour le domaine "${domain}" en "${location}" ? 
-      Fournis une liste de 3 suggestions stratégiques avec une recommandation SEO spécifique pour chacune. 
-      Prends en compte les spécificités culturelles et commerciales de la localisation demandée.`,
-      config: {
-        tools: [{ googleSearch: {} }],
-        systemInstruction: "Tu es un planificateur stratégique SEO expert. Tu identifies les opportunités saisonnières basées sur l'actualité, les tendances de recherche et le contexte local.",
+    const res = await fetch("/api/ai/assistant", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
       },
+      body: JSON.stringify({ messages, useProjectContext, projectId }),
+      signal,
     });
-    return response.text;
-  } catch (error) {
-    console.error("Gemini Error:", error);
-    return "Désolé, les suggestions IA ne sont pas disponibles pour le moment.";
+
+    // Non-streaming error path (validation, auth, quota before stream start)
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => ({}));
+      onError?.(data.error || `Erreur ${res.status}`);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line — split, keep tail in buffer.
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+
+      for (const frame of frames) {
+        const line = frame.trim();
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") {
+          onDone?.();
+          return;
+        }
+        try {
+          const parsed = JSON.parse(payload);
+          if (parsed.error) {
+            onError?.(parsed.error);
+            return;
+          }
+          if (typeof parsed.delta === "string") {
+            onDelta(parsed.delta);
+          }
+        } catch {
+          // Ignore malformed frames rather than aborting the whole stream
+        }
+      }
+    }
+    onDone?.();
+  } catch (err: any) {
+    if (err?.name === "AbortError") return;
+    console.error("streamAssistant error:", err);
+    onError?.(err?.message || "Erreur réseau lors de l'appel à l'assistant.");
   }
 }
 
@@ -53,11 +119,10 @@ export async function qualifyKeywords(projectId: number, keywords: any[], date: 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`
+        Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ projectId, keywords, date })
+      body: JSON.stringify({ projectId, keywords, date }),
     });
-    
     if (!response.ok) throw new Error("Failed to qualify keywords");
     return await response.json();
   } catch (error) {

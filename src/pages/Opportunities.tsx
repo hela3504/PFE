@@ -1,9 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import {
   Zap,
-  TrendingUp,
   Filter,
-  ArrowUpRight,
   Search,
   Info,
   Briefcase,
@@ -18,20 +16,11 @@ import {
   Eye,
   EyeOff,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
-import {
-  ScatterChart,
-  Scatter,
-  XAxis,
-  YAxis,
-  ZAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Cell,
-} from "recharts";
 import { motion, AnimatePresence } from "motion/react";
 import { qualifyKeywords } from "../services/geminiService";
+import { useSelectedProject } from "../hooks/useSelectedProject";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -44,9 +33,7 @@ type OpportunityRow = {
   id: number;
   projectId: number;
   keyword: string;
-  volume: number;
   position: number;
-  competition: number;
   trend: number;
   impressions: number;
   ctr: number;
@@ -64,40 +51,56 @@ type OpportunityRow = {
   priority_level?: string;
   action_hint?: string;
   reasoning?: string;
-  // FIX: is_tracked is now populated by the backend (was always undefined before
-  // because the column didn't exist in the DB and wasn't in the SELECT query)
+  // SERP signals from serp_daily v2
+  has_ai_overview?: boolean;
+  your_in_aio?: boolean;
   is_tracked?: boolean;
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const getPriorityLabel = (score: number) => {
-  if (score >= 1) return "🚀 High";
-  if (score >= 0.4) return "🔥 Medium";
-  return "⚪ Low";
+  if (score >= 200) return { text: "Haute",  cls: "bg-emerald-100 text-emerald-700" };
+  if (score >= 50)  return { text: "Moy.",   cls: "bg-amber-100 text-amber-700" };
+  return               { text: "Faible", cls: "bg-slate-100 text-slate-500" };
 };
 
 const getScoreColor = (score: number) => {
-  if (score >= 1) return "bg-emerald-50 text-emerald-600";
-  if (score >= 0.4) return "bg-amber-50 text-amber-600";
-  return "bg-slate-100 text-slate-600";
+  if (score >= 200) return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  if (score >= 50)  return "bg-amber-50 text-amber-700 border-amber-200";
+  return "bg-slate-50 text-slate-600 border-slate-200";
 };
 
-// FIX: Normalised branded detection — handles both "non_branded" and "non-branded"
-// variants that the backend might return depending on whether the NLP enrichment
-// ran or whether the COALESCE fallback ("non-branded") is active.
-const isBrandedKeyword = (branded_status?: string): boolean => {
-  if (!branded_status) return false;
-  const v = branded_status.toLowerCase().trim();
-  return v === "branded";
+const getPositionColor = (pos: number) => {
+  if (pos <= 3)  return "bg-emerald-100 text-emerald-700";
+  if (pos <= 10) return "bg-amber-100 text-amber-700";
+  return "bg-red-100 text-red-700";
 };
+
+const formatImpressions = (n: number) => {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`;
+  return String(Math.round(n));
+};
+
+const isBrandedKeyword = (branded_status?: string): boolean =>
+  (branded_status ?? "").toLowerCase().trim() === "branded";
+
+const INTENT_STYLES: Record<string, { label: string; cls: string }> = {
+  transactionnelle: { label: "Transac.", cls: "bg-emerald-100 text-emerald-700" },
+  navigationnelle:  { label: "Nav.",    cls: "bg-amber-100 text-amber-700"   },
+  informationnelle: { label: "Info.",   cls: "bg-blue-100 text-blue-700"     },
+};
+
+const getIntentStyle = (intent?: string) =>
+  INTENT_STYLES[intent?.toLowerCase() ?? ""] ?? { label: "N/A", cls: "bg-slate-100 text-slate-400" };
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Opportunities() {
   const [data, setData] = useState<OpportunityRow[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  const [selectedProjectId, setSelectedProjectId] = useSelectedProject();
   const [loading, setLoading] = useState(true);
 
   // FIX: Separate state for each async action to avoid conflating UI states.
@@ -108,15 +111,35 @@ export default function Opportunities() {
   const [resetError, setResetError] = useState<string | null>(null);
   const [resetSuccess, setResetSuccess] = useState(false);
 
+  // Date range filter — sent to the n8n GSC node via /api/opportunities/reset.
+  // Spec body shape: { dateRange, startDate?, endDate?, rowLimit }
+  // rowLimit pilote le GSC.Row Limit côté n8n pour élargir la couverture.
+  type DateRange = "last7Days" | "last28Days" | "last3Months" | "last12Months" | "custom";
+  const ROW_LIMIT_OPTIONS = [100, 250, 500, 1000, 2000, 5000] as const;
+  type RowLimit = typeof ROW_LIMIT_OPTIONS[number];
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const [dateRange, setDateRange] = useState<DateRange>("last3Months");
+  const [startDate, setStartDate] = useState<string>("");
+  const [endDate, setEndDate]     = useState<string>("");
+  // Persisté pour ne pas re-saisir à chaque rechargement.
+  const [rowLimit, setRowLimit] = useState<RowLimit>(() => {
+    const saved = Number(localStorage.getItem("opp_row_limit"));
+    return (ROW_LIMIT_OPTIONS as readonly number[]).includes(saved)
+      ? (saved as RowLimit)
+      : 1000;
+  });
+
   // FIX: trackingId tracks which keyword row is loading, not a global flag.
   const [trackingId, setTrackingId] = useState<number | null>(null);
   const [trackError, setTrackError] = useState<string | null>(null);
+  // Suppression définitive d'un mot-clé (cf. DELETE /api/keywords/:id).
+  // Pas de blacklist : ré-ingestion possible si la donnée revient.
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [deleteToast, setDeleteToast] = useState<string | null>(null);
 
   // Filter state
   const [search, setSearch] = useState("");
-  const [minVolume, setMinVolume] = useState("");
-  const [maxCompetition, setMaxCompetition] = useState("");
-  const [onlyPositiveTrend, setOnlyPositiveTrend] = useState(false);
+  const [intentFilter, setIntentFilter] = useState("");
   const [excludeBranded, setExcludeBranded] = useState(false);
 
   // Modal / qualification state
@@ -183,7 +206,7 @@ export default function Opportunities() {
       position: keyword.position || 0,
       ctr: keyword.ctr || 0,
       impressions: keyword.impressions || 0,
-      competition_score: keyword.competition_score || keyword.competition || 0,
+      competition_score: keyword.competition_score || 0,
       opportunity_score: keyword.opportunity_score || 0,
       ctr_gap: keyword.ctr_gap || 0,
       performance_drift: keyword.performance_drift || 0,
@@ -265,6 +288,41 @@ export default function Opportunities() {
     }
   };
 
+  // ─── Suppression définitive (sans blacklist) ─────────────────────────────
+  // Cf. DELETE /api/keywords/:id : supprime keywords + toutes les facts liées.
+  // Si la donnée revient via une future collecte n8n/GSC, elle réapparaît.
+  // Confirmation renforcée si le mot-clé est actuellement suivi (perte
+  // d'historique).
+  const handleDelete = async (k: OpportunityRow) => {
+    const confirmMsg = k.is_tracked
+      ? `« ${k.keyword} » est actuellement suivi. Sa suppression supprimera aussi son historique de suivi. Continuer ?`
+      : `Ce mot-clé sera supprimé définitivement de la base actuelle. Il pourra réapparaître lors d'une future collecte si les données SEO le ramènent. Continuer ?`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setDeletingId(k.id);
+    setTrackError(null);
+    try {
+      const res = await fetch(`/api/keywords/${k.id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || `HTTP ${res.status}`);
+      }
+      // Retrait immédiat de la ligne pour ne pas attendre un refetch.
+      setData((prev) => prev.filter((item) => item.id !== k.id));
+      setDeleteToast("Mot-clé supprimé. Il pourra réapparaître lors d'une prochaine collecte.");
+      setTimeout(() => setDeleteToast(null), 4000);
+    } catch (error: any) {
+      console.error("Delete keyword error:", error);
+      setTrackError(error.message || "Erreur lors de la suppression du mot-clé.");
+      setTimeout(() => setTrackError(null), 4000);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   // ─── Reset filters (local only) ─────────────────────────────────────────────
   //
   // FIX: The original resetFilters() was doing TWO things at once:
@@ -275,9 +333,7 @@ export default function Opportunities() {
 
   const clearFilters = () => {
     setSearch("");
-    setMinVolume("");
-    setMaxCompetition("");
-    setOnlyPositiveTrend(false);
+    setIntentFilter("");
     setExcludeBranded(false);
   };
 
@@ -287,10 +343,39 @@ export default function Opportunities() {
   // was missing from the backend and has been added to server.ts.
   // Displays a proper inline error instead of an alert() popup.
 
-  const handleTriggerWorkflow = async () => {
-    setResetting(true);
+  // Custom-date validity (used both to gate "Appliquer" and as a final guard)
+  const customDatesValid =
+    !!startDate &&
+    !!endDate &&
+    startDate <= endDate &&
+    endDate <= todayISO;
+
+  const handleTriggerWorkflow = async (
+    rangeOverride?: DateRange,
+    rowLimitOverride?: RowLimit,
+  ) => {
+    const effectiveRange = rangeOverride ?? dateRange;
+    const effectiveRowLimit = rowLimitOverride ?? rowLimit;
     setResetError(null);
     setResetSuccess(false);
+
+    if (effectiveRange === "custom" && !customDatesValid) {
+      setResetError("Sélectionnez une date de début et de fin valides (fin ≥ début, fin ≤ aujourd'hui).");
+      setTimeout(() => setResetError(null), 5000);
+      return;
+    }
+
+    const body: Record<string, any> = {
+      projectId: selectedProjectId || null,
+      dateRange: effectiveRange,
+      rowLimit: effectiveRowLimit,
+    };
+    if (effectiveRange === "custom") {
+      body.startDate = startDate;
+      body.endDate   = endDate;
+    }
+
+    setResetting(true);
     try {
       const res = await fetch("/api/opportunities/reset", {
         method: "POST",
@@ -298,7 +383,7 @@ export default function Opportunities() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${localStorage.getItem("token")}`,
         },
-        body: JSON.stringify({ projectId: selectedProjectId || null }),
+        body: JSON.stringify(body),
       });
 
       const json = await res.json().catch(() => ({}));
@@ -329,41 +414,20 @@ export default function Opportunities() {
         .toLowerCase()
         .includes(search.trim().toLowerCase());
 
-      const matchesMinVolume =
-        minVolume === "" || Number(k.volume || 0) >= Number(minVolume);
+      const matchesIntent =
+        intentFilter === "" ||
+        (k.search_intent?.toLowerCase() ?? "") === intentFilter;
 
-      const matchesMaxCompetition =
-        maxCompetition === "" ||
-        Number(k.competition || 0) <= Number(maxCompetition);
-
-      const matchesTrend = !onlyPositiveTrend || Number(k.trend || 0) > 0;
-
-      // FIX: Use the normalised helper — handles "branded", "non_branded",
-      // "non-branded" variants without ambiguity.
       const matchesBranded = !excludeBranded || !isBrandedKeyword(k.branded_status);
 
-      return (
-        matchesSearch &&
-        matchesMinVolume &&
-        matchesMaxCompetition &&
-        matchesTrend &&
-        matchesBranded
-      );
+      return matchesSearch && matchesIntent && matchesBranded;
     });
-  }, [data, search, minVolume, maxCompetition, onlyPositiveTrend, excludeBranded]);
+  }, [data, search, intentFilter, excludeBranded]);
 
   const trackedCount = useMemo(
     () => data.filter((k) => k.is_tracked).length,
     [data]
   );
-
-  const scatterData = filteredData.map((k) => ({
-    x: Number((k.competition || 0) * 100),
-    y: Number(k.volume || 0),
-    z: Math.max(40, Math.abs((k.trend || 0) * 200)),
-    name: k.keyword,
-    score: Number(k.opportunity_score || 0),
-  }));
 
   const topOpportunity = filteredData[0];
 
@@ -379,7 +443,7 @@ export default function Opportunities() {
             Opportunités
           </h1>
           <p className="text-slate-500 mt-1">
-            Priorisation automatique basée sur volume, compétition et potentiel CTR.
+            Priorisation automatique basée sur impressions, position et potentiel CTR.
           </p>
         </div>
 
@@ -405,7 +469,7 @@ export default function Opportunities() {
           <div className="flex items-center gap-2 px-4 py-2 bg-indigo-50 border border-indigo-100 rounded-xl">
             <Sparkles className="w-4 h-4 text-indigo-600" />
             <span className="text-sm font-bold text-indigo-700">
-              Classement basé sur Opportunity Score
+              Classement basé sur le score d'opportunité
             </span>
           </div>
 
@@ -416,12 +480,12 @@ export default function Opportunities() {
             </div>
           )}
 
-          {/* FIX: Workflow trigger moved out of resetFilters into its own button.
-              Shows inline feedback instead of alert(). */}
+          {/* Manual refresh — uses the date-range filter set below */}
           <div className="flex flex-col items-end gap-1">
             <button
-              onClick={handleTriggerWorkflow}
-              disabled={resetting}
+              onClick={() => handleTriggerWorkflow()}
+              disabled={resetting || (dateRange === "custom" && !customDatesValid)}
+              title="Relance le workflow n8n avec la période sélectionnée"
               className="inline-flex items-center gap-2 px-4 py-2 bg-slate-800 text-white text-sm font-bold rounded-xl hover:bg-slate-900 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <RefreshCw className={`w-4 h-4 ${resetting ? "animate-spin" : ""}`} />
@@ -448,11 +512,77 @@ export default function Opportunities() {
         </div>
       )}
 
-      {/* ── Main grid ──────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      {/* Toast de succès suppression définitive */}
+      {deleteToast && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl px-5 py-3 text-sm text-emerald-700 font-medium">
+          {deleteToast}
+        </div>
+      )}
 
-        {/* ── Table card ───────────────────────────────────────────────────── */}
-        <div className="lg:col-span-2 bg-white rounded-[2.5rem] border border-slate-100 shadow-sm overflow-hidden flex flex-col">
+      {/* ── Summary strip ──────────────────────────────────────────────────── */}
+      {!loading && filteredData.length > 0 && (() => {
+        const high   = filteredData.filter((k) => Number(k.opportunity_score || 0) >= 200).length;
+        const medium = filteredData.filter((k) => {
+          const s = Number(k.opportunity_score || 0);
+          return s >= 50 && s < 200;
+        }).length;
+        const totalGain = filteredData.reduce((s, k) => s + Number(k.opportunity_score || 0), 0);
+        return (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[
+              { label: "Mots-clés analysés", value: filteredData.length, cls: "text-indigo-600 bg-indigo-50" },
+              { label: "Priorité haute (≥ 200)",   value: high,   cls: "text-emerald-600 bg-emerald-50" },
+              { label: "Priorité moyenne (≥ 50)",  value: medium, cls: "text-amber-600 bg-amber-50" },
+              { label: "Gain potentiel total", value: `+${Math.round(totalGain)} clics`, cls: "text-blue-600 bg-blue-50" },
+            ].map((s, i) => (
+              <motion.div
+                key={s.label}
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.05 }}
+                className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5"
+              >
+                <div className={`w-9 h-9 ${s.cls.split(" ")[1]} rounded-xl flex items-center justify-center mb-3`}>
+                  <Zap className={`w-4 h-4 ${s.cls.split(" ")[0]}`} />
+                </div>
+                <div className="text-xl font-bold text-slate-900">{s.value}</div>
+                <div className="text-xs text-slate-500 font-medium mt-0.5">{s.label}</div>
+              </motion.div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* ── Top opportunity callout ───────────────────────────────────────── */}
+      {!loading && topOpportunity && Number(topOpportunity.opportunity_score || 0) > 0 && (
+        <div className="bg-gradient-to-r from-indigo-600 to-indigo-500 rounded-3xl p-6 text-white shadow-lg shadow-indigo-100">
+          <div className="flex items-start justify-between gap-6 flex-wrap">
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 bg-white/20 backdrop-blur rounded-2xl flex items-center justify-center shrink-0">
+                <Zap className="w-6 h-6" />
+              </div>
+              <div>
+                <div className="text-indigo-100 text-[10px] font-bold uppercase tracking-widest mb-1">
+                  Opportunité prioritaire
+                </div>
+                <div className="text-xl font-bold">"{topOpportunity.keyword}"</div>
+                <p className="text-sm text-indigo-100 mt-1">
+                  Position #{Number(topOpportunity.position || 0).toFixed(0)} ·{" "}
+                  {formatImpressions(Number(topOpportunity.impressions || 0))} impressions ·{" "}
+                  Intention {(topOpportunity.search_intent ?? "—").toString().slice(0, 6)}
+                </p>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-3xl font-bold">+{Math.round(Number(topOpportunity.opportunity_score || 0))}</div>
+              <div className="text-xs text-indigo-100 font-medium uppercase tracking-wider">clics potentiels</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Table card ─────────────────────────────────────────────────────── */}
+      <div className="bg-white rounded-[2.5rem] border border-slate-100 shadow-sm overflow-hidden flex flex-col">
 
           {/* Filter bar */}
           <div className="p-6 border-b border-slate-50 bg-slate-50/50 space-y-4">
@@ -491,57 +621,123 @@ export default function Opportunities() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-              <input
-                type="number"
-                value={minVolume}
-                onChange={(e) => setMinVolume(e.target.value)}
-                placeholder="Volume min"
-                className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                max="1"
-                value={maxCompetition}
-                onChange={(e) => setMaxCompetition(e.target.value)}
-                placeholder="Compétition max (0-1)"
-                className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-              <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={onlyPositiveTrend}
-                  onChange={(e) => setOnlyPositiveTrend(e.target.checked)}
-                />
-                Trend positif
-              </label>
+              {/* Période (date range) — sent to n8n GSC node */}
+              <select
+                value={dateRange}
+                onChange={(e) => {
+                  const next = e.target.value as DateRange;
+                  setDateRange(next);
+                  // Auto-trigger n8n on preset change (spec). Custom is staged only.
+                  if (next !== "custom") {
+                    handleTriggerWorkflow(next);
+                  }
+                }}
+                disabled={resetting}
+                title="Période envoyée au workflow n8n pour interroger GSC"
+                className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 text-slate-700 disabled:opacity-60"
+              >
+                <option value="last7Days">7 derniers jours</option>
+                <option value="last28Days">28 derniers jours</option>
+                <option value="last3Months">3 derniers mois</option>
+                <option value="last12Months">12 derniers mois</option>
+                <option value="custom">Personnalisée…</option>
+              </select>
+
+              {/* Row limit — plafond du GSC node de n8n. Auto-trigger comme dateRange. */}
+              <select
+                value={rowLimit}
+                onChange={(e) => {
+                  const next = Number(e.target.value) as RowLimit;
+                  setRowLimit(next);
+                  localStorage.setItem("opp_row_limit", String(next));
+                  // Auto-trigger n8n sauf en mode custom (qui attend "Appliquer")
+                  if (dateRange !== "custom") {
+                    handleTriggerWorkflow(undefined, next);
+                  }
+                }}
+                disabled={resetting}
+                title="Nombre maximum de mots-clés à récupérer depuis Google Search Console"
+                className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 text-slate-700 disabled:opacity-60"
+              >
+                {ROW_LIMIT_OPTIONS.map((n) => (
+                  <option key={n} value={n}>
+                    {n.toLocaleString("fr-FR")} mots-clés max
+                  </option>
+                ))}
+              </select>
+              <select
+                value={intentFilter}
+                onChange={(e) => setIntentFilter(e.target.value)}
+                className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 text-slate-700"
+              >
+                <option value="">Toutes les intentions</option>
+                <option value="informationnelle">Informationnelle</option>
+                <option value="transactionnelle">Transactionnelle</option>
+                <option value="navigationnelle">Navigationnelle</option>
+              </select>
               <label className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-700 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={excludeBranded}
                   onChange={(e) => setExcludeBranded(e.target.checked)}
                 />
-                Exclure branded
+                Exclure les mots-clés de marque
               </label>
             </div>
+
+            {/* Custom date range — visible only when dateRange === "custom" */}
+            {dateRange === "custom" && (
+              <div className="flex items-end gap-3 flex-wrap pt-2 border-t border-slate-100">
+                <div className="flex flex-col">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1 mb-1">Date début</label>
+                  <input
+                    type="date"
+                    value={startDate}
+                    max={endDate || todayISO}
+                    onChange={(e) => setStartDate(e.target.value)}
+                    className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-700 outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <div className="flex flex-col">
+                  <label className="text-[10px] font-bold text-slate-500 uppercase tracking-wider ml-1 mb-1">Date fin</label>
+                  <input
+                    type="date"
+                    value={endDate}
+                    min={startDate}
+                    max={todayISO}
+                    onChange={(e) => setEndDate(e.target.value)}
+                    className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-700 outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <button
+                  onClick={() => handleTriggerWorkflow()}
+                  disabled={!customDatesValid || resetting}
+                  className="inline-flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white text-sm font-bold rounded-xl hover:bg-indigo-700 shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed h-[38px]"
+                >
+                  {resetting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  Appliquer
+                </button>
+                {!customDatesValid && (startDate || endDate) && (
+                  <span className="text-xs text-amber-700 self-center">
+                    Renseignez deux dates valides (fin ≥ début, fin ≤ aujourd'hui).
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Table */}
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
-                <tr className="text-slate-400 text-[10px] uppercase tracking-wider font-bold">
-                  <th className="px-6 py-4">Keyword</th>
-                  <th className="px-6 py-4">Volume</th>
-                  <th className="px-6 py-4">Position</th>
-                  <th className="px-6 py-4">Compétition</th>
-                  <th className="px-6 py-4">Trend</th>
-                  <th className="px-6 py-4 text-right">Opp. Score</th>
-                  {/*
-                    FIX: "Suivi" column header added — was missing in the previous
-                    version but the column existed in tbody, causing misalignment.
-                  */}
+                <tr className="text-slate-400 text-[10px] uppercase tracking-wider font-bold border-b border-slate-100">
+                  <th className="px-6 py-4">Mot-clé</th>
+                  <th className="px-6 py-4">Pos.</th>
+                  <th className="px-6 py-4">Impressions</th>
+                  <th className="px-6 py-4">CTR</th>
+                  <th className="px-6 py-4">Intention</th>
+                  <th className="px-6 py-4">Marque</th>
+                  <th className="px-6 py-4 text-right">Gain potentiel</th>
                   <th className="px-6 py-4 text-right">Suivi</th>
                 </tr>
               </thead>
@@ -549,232 +745,178 @@ export default function Opportunities() {
               <tbody className="divide-y divide-slate-50">
                 {loading ? (
                   <tr>
-                    <td colSpan={7} className="px-6 py-10 text-center text-slate-400">
-                      Chargement...
+                    <td colSpan={8} className="px-6 py-10 text-center text-slate-400">
+                      <div className="inline-flex items-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Chargement...
+                      </div>
                     </td>
                   </tr>
                 ) : filteredData.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-6 py-10 text-center text-slate-400">
-                      Aucune opportunité trouvée.
+                    <td colSpan={8} className="px-6 py-16 text-center">
+                      <div className="flex flex-col items-center gap-3 text-slate-400">
+                        <Search className="w-8 h-8 opacity-40" />
+                        <p className="font-medium">Aucune opportunité trouvée.</p>
+                        <p className="text-xs">Ajustez vos filtres ou relancez la collecte.</p>
+                      </div>
                     </td>
                   </tr>
                 ) : (
-                  filteredData.map((k) => (
-                    <tr
-                      key={k.id}
-                      className="hover:bg-slate-50/50 transition-colors group"
-                    >
-                      {/* Keyword cell — click opens qualification modal */}
-                      <td
-                        onClick={() => handleQualify(k)}
-                        className="px-6 py-4 cursor-pointer"
+                  filteredData.map((k) => {
+                    const pos = Number(k.position || 0);
+                    const imp = Number(k.impressions || 0);
+                    const ctr = Number(k.ctr || 0);
+                    const score = Number(k.opportunity_score || 0);
+                    const priority = getPriorityLabel(score);
+
+                    return (
+                      <tr
+                        key={k.id}
+                        className="hover:bg-slate-50/50 transition-colors group"
                       >
-                        <div className="font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">
-                          {k.keyword}
-                        </div>
-                        <div className="flex items-center gap-2 mt-1 flex-wrap">
-                          <span className="text-[10px] text-slate-400 uppercase font-bold tracking-tighter">
-                            {k.search_intent || "N/A"}
+                        {/* Keyword — click opens qualification modal */}
+                        <td
+                          onClick={() => handleQualify(k)}
+                          className="px-6 py-4 cursor-pointer max-w-[220px]"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <div className="font-bold text-slate-900 group-hover:text-indigo-600 transition-colors truncate">
+                              {k.keyword}
+                            </div>
+                            {k.has_ai_overview && (
+                              <span
+                                title={
+                                  k.your_in_aio
+                                    ? "AI Overview présent — votre domaine est cité"
+                                    : "AI Overview présent — votre domaine n'est PAS cité"
+                                }
+                                className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider border ${
+                                  k.your_in_aio
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : "bg-amber-50 text-amber-700 border-amber-200"
+                                }`}
+                              >
+                                <Sparkles className="w-2.5 h-2.5" />
+                                {k.your_in_aio ? "AIO ✓" : "AIO ✗"}
+                              </span>
+                            )}
+                          </div>
+                          {k.action_hint && (
+                            <div className="text-[10px] text-slate-400 mt-0.5 truncate">
+                              {k.action_hint}
+                            </div>
+                          )}
+                        </td>
+
+                        {/* Position */}
+                        <td className="px-6 py-4">
+                          <span className={`px-2 py-1 rounded-lg text-xs font-bold ${getPositionColor(pos)}`}>
+                            #{pos > 0 ? pos.toFixed(0) : "–"}
                           </span>
-                          {k.branded_status && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 font-bold uppercase">
-                              {String(k.branded_status).replace(/_/g, " ")}
+                        </td>
+
+                        {/* Impressions */}
+                        <td className="px-6 py-4">
+                          <span className="text-sm font-bold text-slate-700">
+                            {imp > 0 ? formatImpressions(imp) : <span className="text-slate-300">–</span>}
+                          </span>
+                        </td>
+
+                        {/* CTR (from GSC) */}
+                        <td className="px-6 py-4">
+                          <span className="text-sm font-bold text-slate-700">
+                            {ctr > 0
+                              ? `${(ctr * 100).toFixed(2)}%`
+                              : <span className="text-slate-300">–</span>}
+                          </span>
+                        </td>
+
+                        {/* Intention */}
+                        <td className="px-6 py-4">
+                          {(() => {
+                            const s = getIntentStyle(k.search_intent);
+                            return (
+                              <span className={`px-2 py-1 rounded-lg text-[11px] font-bold ${s.cls}`}>
+                                {s.label}
+                              </span>
+                            );
+                          })()}
+                        </td>
+
+                        {/* Branded */}
+                        <td className="px-6 py-4">
+                          {isBrandedKeyword(k.branded_status) ? (
+                            <span className="px-2 py-1 rounded-lg text-[11px] font-bold bg-indigo-100 text-indigo-700">
+                              De marque
+                            </span>
+                          ) : (
+                            <span className="px-2 py-1 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-500">
+                              Générique
                             </span>
                           )}
-                        </div>
-                      </td>
+                        </td>
 
-                      <td className="px-6 py-4 text-sm text-slate-600 font-medium">
-                        {Number(k.volume || 0).toLocaleString()}
-                      </td>
+                        {/* Opportunity Score */}
+                        <td className="px-6 py-4 text-right">
+                          <div className="inline-flex items-center gap-2 justify-end">
+                            <span className={`px-3 py-1 rounded-full text-xs font-bold border ${getScoreColor(score)}`}>
+                              +{Math.round(score)} clics
+                            </span>
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${priority.cls}`}>
+                              {priority.text}
+                            </span>
+                          </div>
+                        </td>
 
-                      <td className="px-6 py-4">
-                        <span className="px-2 py-1 bg-slate-100 text-slate-700 rounded-lg text-xs font-bold">
-                          #{Number(k.position || 0).toFixed(1)}
-                        </span>
-                      </td>
-
-                      <td className="px-6 py-4">
-                        <div className="w-24 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full rounded-full ${
-                              Number(k.competition || 0) > 0.7
-                                ? "bg-red-500"
-                                : Number(k.competition || 0) > 0.4
-                                ? "bg-amber-500"
-                                : "bg-emerald-500"
-                            }`}
-                            style={{ width: `${Number(k.competition || 0) * 100}%` }}
-                          />
-                        </div>
-                      </td>
-
-                      <td className="px-6 py-4">
-                        <div
-                          className={`flex items-center gap-1 text-xs font-bold ${
-                            Number(k.trend || 0) > 0 ? "text-emerald-600" : "text-red-600"
-                          }`}
+                        {/* Track button + suppression définitive */}
+                        <td
+                          className="px-6 py-4 text-right"
+                          onClick={(e) => e.stopPropagation()}
                         >
-                          <TrendingUp
-                            className={`w-3 h-3 ${Number(k.trend || 0) > 0 ? "" : "rotate-180"}`}
-                          />
-                          {Math.abs(Number(k.trend || 0) * 100).toFixed(0)}%
-                        </div>
-                      </td>
-
-                      <td className="px-6 py-4 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <span
-                            className={`px-3 py-1 rounded-full text-xs font-bold ${getScoreColor(
-                              Number(k.opportunity_score || 0)
-                            )}`}
-                          >
-                            {Number(k.opportunity_score || 0).toFixed(2)}
-                          </span>
-                          <span className="text-xs text-slate-400">
-                            {getPriorityLabel(Number(k.opportunity_score || 0))}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/*
-                        FIX: Track button is now inside a dedicated <td> that
-                        stops click propagation so it doesn't open the modal.
-                        Previously the entire <tr> had onClick={() => handleQualify(k)}
-                        which meant clicking "Suivre" also opened the modal.
-                        Now only the keyword cell triggers qualification.
-                      */}
-                      <td
-                        className="px-6 py-4 text-right"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <button
-                          onClick={() =>
-                            k.is_tracked ? handleUntrack(k.id) : handleTrack(k.id)
-                          }
-                          disabled={trackingId === k.id}
-                          title={k.is_tracked ? "Retirer du suivi" : "Ajouter au suivi"}
-                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
-                            k.is_tracked
-                              ? "bg-red-50 text-red-600 hover:bg-red-100 border border-red-100"
-                              : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm"
-                          } disabled:opacity-60 disabled:cursor-not-allowed`}
-                        >
-                          {trackingId === k.id ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : k.is_tracked ? (
-                            <EyeOff className="w-3.5 h-3.5" />
-                          ) : (
-                            <Eye className="w-3.5 h-3.5" />
-                          )}
-                          {k.is_tracked ? "Retirer" : "Suivre"}
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                          <div className="inline-flex items-center gap-2">
+                            <button
+                              onClick={() =>
+                                k.is_tracked ? handleUntrack(k.id) : handleTrack(k.id)
+                              }
+                              disabled={trackingId === k.id || deletingId === k.id}
+                              title={k.is_tracked ? "Retirer du suivi" : "Ajouter au suivi"}
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                                k.is_tracked
+                                  ? "bg-red-50 text-red-600 hover:bg-red-100 border border-red-100"
+                                  : "bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm"
+                              } disabled:opacity-60 disabled:cursor-not-allowed`}
+                            >
+                              {trackingId === k.id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : k.is_tracked ? (
+                                <EyeOff className="w-3.5 h-3.5" />
+                              ) : (
+                                <Eye className="w-3.5 h-3.5" />
+                              )}
+                              {k.is_tracked ? "Retirer" : "Suivre"}
+                            </button>
+                            <button
+                              onClick={() => handleDelete(k)}
+                              disabled={deletingId === k.id || trackingId === k.id}
+                              title="Supprimer définitivement (ré-importable lors d'une future collecte)"
+                              className="p-1.5 rounded-xl text-slate-400 hover:text-red-600 hover:bg-red-50 transition-all border border-transparent hover:border-red-100 disabled:opacity-60 disabled:cursor-not-allowed"
+                            >
+                              {deletingId === k.id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
           </div>
-        </div>
-
-        {/* ── Sidebar ──────────────────────────────────────────────────────── */}
-        <div className="space-y-8">
-          {/* Scatter chart */}
-          <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm">
-            <h3 className="text-xl font-bold text-slate-900 mb-6 flex items-center gap-2">
-              Analyse Scatter
-              <Info className="w-4 h-4 text-slate-300" />
-            </h3>
-            <div className="h-[300px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <ScatterChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis
-                    type="number"
-                    dataKey="x"
-                    name="Competition"
-                    unit="%"
-                    axisLine={false}
-                    tickLine={false}
-                    tick={{ fill: "#94a3b8", fontSize: 10 }}
-                  />
-                  <YAxis
-                    type="number"
-                    dataKey="y"
-                    name="Volume"
-                    axisLine={false}
-                    tickLine={false}
-                    tick={{ fill: "#94a3b8", fontSize: 10 }}
-                  />
-                  <ZAxis type="number" dataKey="z" range={[50, 400]} name="Trend" />
-                  <Tooltip
-                    cursor={{ strokeDasharray: "3 3" }}
-                    contentStyle={{
-                      backgroundColor: "#fff",
-                      borderRadius: "16px",
-                      border: "none",
-                      boxShadow: "0 10px 15px -3px rgb(0 0 0 / 0.1)",
-                    }}
-                  />
-                  <Scatter name="Keywords" data={scatterData}>
-                    {scatterData.map((entry, index) => (
-                      <Cell
-                        key={`cell-${index}`}
-                        fill={
-                          entry.score >= 1
-                            ? "#10b981"
-                            : entry.score >= 0.4
-                            ? "#f59e0b"
-                            : "#6366f1"
-                        }
-                      />
-                    ))}
-                  </Scatter>
-                </ScatterChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="mt-6 p-4 bg-indigo-50 rounded-2xl border border-indigo-100">
-              <div className="flex items-center gap-2 text-indigo-600 font-bold text-sm mb-1">
-                <Zap className="w-4 h-4" />
-                Opportunité prioritaire
-              </div>
-              <p className="text-xs text-slate-600 leading-relaxed">
-                {topOpportunity ? (
-                  <>
-                    Le mot-clé <strong>"{topOpportunity.keyword}"</strong> présente le
-                    meilleur score actuel. Il combine potentiel de gain, volume et
-                    compétition exploitable.
-                  </>
-                ) : (
-                  <>Aucune opportunité mise en avant pour le moment.</>
-                )}
-              </p>
-            </div>
-          </div>
-
-          {/* IA insights card */}
-          <div className="bg-slate-900 p-8 rounded-[2.5rem] text-white overflow-hidden relative group">
-            <div className="relative z-10">
-              <div className="text-indigo-400 font-bold text-xs uppercase tracking-widest mb-2">
-                IA Insights
-              </div>
-              <h4 className="text-xl font-bold mb-4">Lecture décisionnelle</h4>
-              <p className="text-slate-400 text-sm leading-relaxed mb-6">
-                L'objectif est de concentrer les efforts SEO sur les mots-clés à
-                meilleur rendement potentiel : bon volume, concurrence acceptable et
-                marge d'amélioration mesurable.
-              </p>
-              <button className="flex items-center gap-2 text-sm font-bold hover:gap-3 transition-all">
-                Explorer les opportunités
-                <ArrowUpRight className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="absolute -right-10 -bottom-10 w-40 h-40 bg-indigo-600/20 rounded-full blur-3xl group-hover:scale-150 transition-transform duration-700" />
-          </div>
-        </div>
       </div>
 
       {/* ── Qualification modal ─────────────────────────────────────────────── */}
@@ -884,12 +1026,44 @@ export default function Opportunities() {
                       </div>
                     </div>
 
+                    {/* AI Overview signal — pulled from the row, not the qualification result */}
+                    {selectedKeyword?.has_ai_overview && (
+                      <div
+                        className={`rounded-2xl p-4 flex items-center gap-3 border ${
+                          selectedKeyword.your_in_aio
+                            ? "bg-emerald-50 border-emerald-100"
+                            : "bg-amber-50 border-amber-100"
+                        }`}
+                      >
+                        <Sparkles className={`w-5 h-5 shrink-0 ${
+                          selectedKeyword.your_in_aio ? "text-emerald-600" : "text-amber-600"
+                        }`} />
+                        <div>
+                          <div className={`text-[10px] uppercase font-bold tracking-wider ${
+                            selectedKeyword.your_in_aio ? "text-emerald-600" : "text-amber-600"
+                          }`}>
+                            AI Overview
+                          </div>
+                          <div className="text-sm font-bold text-slate-900">
+                            {selectedKeyword.your_in_aio
+                              ? "Votre domaine est cité dans l'AI Overview ✓"
+                              : "AI Overview présent — votre domaine n'est PAS cité"}
+                          </div>
+                          {!selectedKeyword.your_in_aio && (
+                            <div className="text-xs text-amber-700 mt-1">
+                              Optimisez le contenu (FAQ, données structurées, autorité de page) pour être cité.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
                     {/* 4-cell grid */}
                     <div className="grid grid-cols-2 gap-4">
                       {[
                         {
                           icon: ShieldCheck,
-                          label: "Branding",
+                          label: "Marque",
                           value: qualificationResult.branded_status?.replace(/_/g, " "),
                         },
                         {

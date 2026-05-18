@@ -1,1 +1,43 @@
 @import "tailwindcss";
+@variant dark (&:where(.dark, .dark *));
+
+/* Brand palette — remap Tailwind's indigo-* scale onto the Waoo logo's
+   royal-blue hue. Every existing `indigo-*` utility across the codebase
+   instantly picks up the new color, no component edits required. */
+@theme {
+  --color-indigo-50:  #eff6ff;
+  --color-indigo-100: #dbeafe;
+  --color-indigo-200: #bfdbfe;
+  --color-indigo-300: #93c5fd;
+  --color-indigo-400: #60a5fa;
+  --color-indigo-500: #3b82f6;
+  --color-indigo-600: #2563eb; /* Waoo accent sphere */
+  --color-indigo-700: #1d4ed8; /* Waoo "w" letter */
+  --color-indigo-800: #1e40af;
+  --color-indigo-900: #1e3a8a;
+  --color-indigo-950: #172554;
+}
+
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+  --border-color: #f1f5f9;
+  --card-bg: #ffffff;
+}
+
+.dark {
+  --bg-primary: #0f172a;
+  --bg-secondary: #1e293b;
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --border-color: #334155;
+  --card-bg: #1e293b;
+}
+
+body {
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  transition: background-color 0.3s, color 0.3s;
+}

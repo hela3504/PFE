@@ -3,7 +3,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Plus,
-  Sparkles,
   Loader2,
 } from "lucide-react";
 import {
@@ -20,8 +19,7 @@ import {
 } from "date-fns";
 import { fr } from "date-fns/locale";
 import { motion, AnimatePresence } from "motion/react";
-import { getSeasonalSuggestions } from "../services/geminiService";
-import Markdown from "react-markdown";
+import SeasonalAssistant from "../components/SeasonalAssistant";
 
 const EVENT_TYPES = {
   Publication: { color: "bg-blue-500", light: "bg-blue-50", text: "text-blue-600" },
@@ -37,10 +35,6 @@ export default function Calendar() {
   const [error, setError] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [projects, setProjects] = useState<any[]>([]);
-  const [aiSuggestions, setAiSuggestions] = useState<string | null>(null);
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiDomain, setAiDomain] = useState("Parapharmacie");
-  const [aiLocation, setAiLocation] = useState("France");
   const [newEvent, setNewEvent] = useState({
     projectId: "",
     title: "",
@@ -94,20 +88,9 @@ export default function Calendar() {
     }
   };
 
-  const generateSuggestions = async () => {
-    setAiLoading(true);
-    try {
-      const suggestions = await getSeasonalSuggestions(aiDomain, aiLocation);
-      setAiSuggestions(suggestions || null);
-    } catch (err) {
-      console.error("generateSuggestions error:", err);
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
     try {
       const token = localStorage.getItem("token");
       const res = await fetch("/api/calendar", {
@@ -118,12 +101,16 @@ export default function Calendar() {
         },
         body: JSON.stringify(newEvent),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Erreur ${res.status}`);
+      }
       setIsModalOpen(false);
       fetchEvents();
-    } catch (err) {
+    } catch (err: any) {
       console.error("handleCreate error:", err);
-      alert("Erreur lors de la création de l'événement.");
+      setError(err?.message || "Erreur lors de la création de l'événement.");
+      setTimeout(() => setError(null), 5000);
     }
   };
 
@@ -259,84 +246,8 @@ export default function Calendar() {
         )}
       </div>
 
-      {/* AI Suggestions */}
-      <div className="bg-slate-900 p-10 rounded-[3rem] text-white relative overflow-hidden group">
-        <div className="relative z-10">
-          <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6 mb-8">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 bg-indigo-500/20 rounded-2xl flex items-center justify-center text-indigo-400 border border-indigo-500/30">
-                <Sparkles className="w-6 h-6" />
-              </div>
-              <div>
-                <h3 className="text-2xl font-bold">Suggestions IA Saisonnières</h3>
-                <p className="text-slate-400 text-sm mt-1">Anticipez les tendances de recherche à venir.</p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-4 w-full lg:w-auto">
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] uppercase font-bold text-slate-500 tracking-wider ml-1">Domaine</label>
-                <input
-                  type="text"
-                  value={aiDomain}
-                  onChange={(e) => setAiDomain(e.target.value)}
-                  placeholder="Ex: Parapharmacie"
-                  className="bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all w-40"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-[10px] uppercase font-bold text-slate-500 tracking-wider ml-1">Localisation</label>
-                <input
-                  type="text"
-                  value={aiLocation}
-                  onChange={(e) => setAiLocation(e.target.value)}
-                  placeholder="Ex: Tunisie"
-                  className="bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all w-40"
-                />
-              </div>
-              <button
-                onClick={generateSuggestions}
-                disabled={aiLoading}
-                className="flex items-center gap-2 px-6 py-3 bg-white text-slate-900 rounded-2xl font-bold hover:bg-slate-100 transition-all disabled:opacity-50 mt-4 lg:mt-0"
-              >
-                {aiLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
-                {aiSuggestions ? "Actualiser" : "Analyser"}
-              </button>
-            </div>
-          </div>
-
-          <div className="min-h-[100px]">
-            {aiLoading ? (
-              <div className="py-12 flex flex-col items-center justify-center gap-4">
-                <Loader2 className="w-10 h-10 text-indigo-400 animate-spin" />
-                <p className="text-slate-400 font-medium animate-pulse">
-                  Recherche des événements saisonniers...
-                </p>
-              </div>
-            ) : aiSuggestions ? (
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-              >
-                <div className="bg-white/5 border border-white/10 rounded-3xl p-8 backdrop-blur-sm">
-                  <div className="text-slate-300 leading-relaxed">
-                    <Markdown>{aiSuggestions}</Markdown>
-                  </div>
-                </div>
-              </motion.div>
-            ) : (
-              <div className="py-12 text-center border-2 border-dashed border-white/10 rounded-3xl">
-                <p className="text-slate-500 font-medium">
-                  L'IA peut analyser le web pour vous suggérer des événements comme le Black Friday, les soldes ou les vacances d'été.
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="absolute -right-20 -bottom-20 w-96 h-96 bg-indigo-600/20 rounded-full blur-[100px] group-hover:scale-110 transition-transform duration-1000" />
-        <div className="absolute -left-20 -top-20 w-64 h-64 bg-blue-600/10 rounded-full blur-[80px] group-hover:scale-110 transition-transform duration-1000" />
-      </div>
+      {/* AI Assistant — conversational, streaming, project-context aware */}
+      <SeasonalAssistant projects={projects} />
 
       {/* Modal */}
       <AnimatePresence>

@@ -1,6 +1,17 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Plus, Globe, Trash2, Edit2, ExternalLink, Search, Filter } from "lucide-react";
+import { Plus, Globe, Trash2, Edit2, ExternalLink, Search, AlertCircle } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+
+// Strip protocol/www/path/whitespace and lowercase. Valid result must match
+// `something.tld` (optionally `something.co.uk`-style two-level TLD).
+const DOMAIN_RE = /^[a-z0-9][a-z0-9-]*\.[a-z]{2,}(\.[a-z]{2,})?$/i;
+const cleanDomain = (raw: string): string =>
+  raw
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/\/.*$/, "");
 
 type Project = {
   id: number;
@@ -8,6 +19,7 @@ type Project = {
   domain: string;
   country: string;
   language: string;
+  branded_keywords?: string | null;
   created_at: string | null;
   userId?: number;
 };
@@ -17,6 +29,7 @@ const emptyProject = {
   domain: "",
   country: "FR",
   language: "Français",
+  branded_keywords: "",
 };
 
 export default function Projects() {
@@ -26,6 +39,7 @@ export default function Projects() {
   const [formData, setFormData] = useState(emptyProject);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchProjects();
@@ -67,6 +81,7 @@ export default function Projects() {
       domain: project.domain || "",
       country: project.country || "FR",
       language: project.language || "Français",
+      branded_keywords: project.branded_keywords || "",
     });
     setIsModalOpen(true);
   };
@@ -100,14 +115,27 @@ export default function Projects() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
       await fetchProjects();
-    } catch (error) {
-      console.error("Projects delete error:", error);
-      alert("Erreur lors de la suppression du projet.");
+    } catch (err: any) {
+      console.error("Projects delete error:", err);
+      setError(err?.message || "Erreur lors de la suppression du projet.");
+      setTimeout(() => setError(null), 4000);
     }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
+
+    // Domain: required + structured "name.tld" (e.g. paraexpert.tn, seo-bi.com)
+    const cleanedDomain = cleanDomain(formData.domain);
+    if (!cleanedDomain) {
+      setError("Le domaine est requis.");
+      return;
+    }
+    if (!DOMAIN_RE.test(cleanedDomain)) {
+      setError("Le domaine doit avoir la structure « nomdusite.com » (ex : paraexpert.tn, mon-site.fr).");
+      return;
+    }
 
     try {
       const token = localStorage.getItem("token");
@@ -126,18 +154,21 @@ export default function Projects() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({ ...formData, domain: cleanedDomain }),
       });
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Erreur ${res.status}`);
+      }
 
       setIsModalOpen(false);
       setEditingProject(null);
       setFormData(emptyProject);
       await fetchProjects();
-    } catch (error) {
-      console.error("Projects submit error:", error);
-      alert("Erreur lors de l’enregistrement du projet.");
+    } catch (err: any) {
+      console.error("Projects submit error:", err);
+      setError(err?.message || "Erreur lors de l’enregistrement du projet.");
     }
   };
 
@@ -183,24 +214,23 @@ export default function Projects() {
         </button>
       </div>
 
+      {error && (
+        <div className="mb-6 px-5 py-3 rounded-2xl text-sm font-medium border bg-red-50 border-red-200 text-red-700">
+          {error}
+        </div>
+      )}
+
       <div className="bg-white rounded-[2rem] border border-slate-100 shadow-sm overflow-hidden">
         <div className="p-6 border-b border-slate-50 flex items-center justify-between bg-slate-50/50">
-          <div className="flex items-center gap-4">
-            <div className="relative">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Filtrer les projets..."
-                className="pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 w-64 outline-none"
-              />
-            </div>
-
-            <button className="flex items-center gap-2 px-4 py-2 text-slate-600 hover:bg-white border border-transparent hover:border-slate-200 rounded-xl transition-all text-sm font-medium">
-              <Filter className="w-4 h-4" />
-              Filtres
-            </button>
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Filtrer les projets..."
+              className="pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 w-64 outline-none"
+            />
           </div>
 
           <div className="text-sm text-slate-500 font-medium">
@@ -338,17 +368,40 @@ export default function Projects() {
                   />
                 </div>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-bold text-slate-700 ml-1">Domaine (URL)</label>
-                  <input
-                    type="text"
-                    required
-                    value={formData.domain}
-                    onChange={(e) => setFormData({ ...formData, domain: e.target.value })}
-                    className="w-full px-5 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                    placeholder="Ex: monsite.com"
-                  />
-                </div>
+                {(() => {
+                  const cleaned = cleanDomain(formData.domain);
+                  const showHint = formData.domain.length > 0 && !DOMAIN_RE.test(cleaned);
+                  return (
+                    <div className="space-y-2">
+                      <label className="text-sm font-bold text-slate-700 ml-1">
+                        Domaine <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={formData.domain}
+                        onChange={(e) => setFormData({ ...formData, domain: e.target.value })}
+                        className={`w-full px-5 py-3.5 bg-slate-50 border rounded-2xl focus:ring-2 outline-none transition-all ${
+                          showHint
+                            ? "border-red-300 focus:ring-red-500"
+                            : "border-slate-200 focus:ring-indigo-500"
+                        }`}
+                        placeholder="ex: paraexpert.tn"
+                        autoComplete="off"
+                      />
+                      {showHint ? (
+                        <p className="text-xs text-red-600 ml-1 flex items-center gap-1.5">
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                          Format invalide — attendu : <strong>nomdusite.com</strong> (ex : paraexpert.tn, mon-site.fr).
+                        </p>
+                      ) : (
+                        <p className="text-xs text-slate-400 ml-1">
+                          Saisissez le domaine seul, sans <code>https://</code> ni <code>www.</code>
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -377,6 +430,23 @@ export default function Projects() {
                       <option value="Allemand">Allemand</option>
                     </select>
                   </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-slate-700 ml-1">
+                    Mots-clés de marque
+                    <span className="text-xs text-slate-400 font-normal ml-2">(séparés par des virgules)</span>
+                  </label>
+                  <textarea
+                    value={formData.branded_keywords}
+                    onChange={(e) => setFormData({ ...formData, branded_keywords: e.target.value })}
+                    rows={2}
+                    className="w-full px-5 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                    placeholder="ex: monsite, mon-site, marque-x"
+                  />
+                  <p className="text-xs text-slate-400 ml-1">
+                    Utilisés par la qualification NLP pour distinguer Branded vs Non-brand.
+                  </p>
                 </div>
 
                 <div className="flex gap-4 pt-4">
