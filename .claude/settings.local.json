@@ -59,7 +59,9 @@
       "mcp__n8n-mcp__execute_workflow",
       "mcp__n8n-mcp__search_executions",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(npx --yes tsc --noEmit swagger-docs.ts)",
+      "Bash(PORT=3001 npx tsx *)"
     ]
   }
 }

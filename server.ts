@@ -11,6 +11,8 @@ import OpenAI from "openai";
 import { z } from "zod";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
+import swaggerJsdoc from "swagger-jsdoc";
+import swaggerUi from "swagger-ui-express";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -404,6 +406,61 @@ app.use(express.json({ limit: "5mb" }));
 // Serve uploaded avatars at /uploads/* in dev too (Vite serves /public/* in dev,
 // but uploads land outside the bundled tree so we mount them explicitly)
 app.use("/uploads", express.static(path.join(__dirname, "public", "uploads")));
+
+// ── Swagger / OpenAPI 3.0 ────────────────────────────────────────────────────
+// Documentation interactive de l'API REST. Active via SWAGGER_ENABLED=true
+// dans .env. Les annotations @swagger sont lues depuis swagger-docs.ts.
+// UI accessible via la route définie par SWAGGER_ROUTE (par défaut /api-docs).
+if ((process.env.SWAGGER_ENABLED || "true").toLowerCase() === "true") {
+  const swaggerSpec = swaggerJsdoc({
+    definition: {
+      openapi: "3.0.0",
+      info: {
+        title: process.env.SWAGGER_TITLE || "SEO BI API",
+        version: process.env.SWAGGER_VERSION || "1.0.0",
+        description:
+          process.env.SWAGGER_DESCRIPTION ||
+          "API REST de l'application SEO Business Intelligence — gestion projets, suivi de mots-clés, KPIs SEO et IA.",
+      },
+      servers: [
+        {
+          url: process.env.SWAGGER_SERVER_URL || "http://localhost:3000",
+          description: "Serveur courant",
+        },
+      ],
+      components: {
+        securitySchemes: {
+          bearerAuth: {
+            type: "http",
+            scheme: "bearer",
+            bearerFormat: "JWT",
+            description: "Token JWT obtenu via /api/auth/login (valable 24h)",
+          },
+          apiKeyAuth: {
+            type: "apiKey",
+            in: "header",
+            name: "x-api-key",
+            description: "Clé API_KEY_N8N partagée avec les workflows n8n",
+          },
+        },
+      },
+    },
+    apis: [path.join(__dirname, "swagger-docs.ts")],
+  });
+
+  const swaggerRoute = process.env.SWAGGER_ROUTE || "/api-docs";
+  app.use(
+    swaggerRoute,
+    swaggerUi.serve,
+    swaggerUi.setup(swaggerSpec, {
+      customSiteTitle: process.env.SWAGGER_TITLE || "SEO BI API",
+      customCss: ".swagger-ui .topbar { display: none }",
+    })
+  );
+  // Spec JSON brut pour exports / outils externes
+  app.get(`${swaggerRoute}.json`, (_req, res) => res.json(swaggerSpec));
+  console.log(`📚 Swagger UI disponible sur ${swaggerRoute}`);
+}
 
 const authenticate = (req: any, res: any, next: any) => {
   const authHeader = req.headers.authorization;
@@ -3737,7 +3794,7 @@ app.get("/api/debug/data-check", authenticate, async (req: any, res) => {
 });
 
 async function startServer() {
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
