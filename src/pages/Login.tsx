@@ -114,15 +114,17 @@ export default function Login({ onLogin }: LoginProps) {
         key={mode}
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="relative w-full max-w-md bg-white rounded-3xl shadow-xl shadow-slate-200/60 p-10 border border-slate-100"
+        className={`relative w-full max-w-md bg-white rounded-3xl shadow-xl shadow-slate-200/60 border border-slate-100 ${
+          isSignup ? "p-6" : "p-10"
+        }`}
       >
         {/* ── Brand header ──────────────────────────────────────────────── */}
-        <div className="text-center mb-10">
-          <div className="flex flex-col items-center gap-4 mb-6">
+        <div className={`text-center ${isSignup ? "mb-4" : "mb-10"}`}>
+          <div className={`flex flex-col items-center ${isSignup ? "gap-2 mb-3" : "gap-4 mb-6"}`}>
             <img
               src="/logo-bleu-waoo.png"
               alt="Waoo"
-              className="h-16 w-auto object-contain select-none"
+              className={`${isSignup ? "h-10" : "h-16"} w-auto object-contain select-none`}
               draggable={false}
             />
             <div className="flex items-center gap-2">
@@ -134,51 +136,51 @@ export default function Login({ onLogin }: LoginProps) {
             </div>
           </div>
 
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">
+          <h1 className={`font-bold text-slate-900 tracking-tight ${isSignup ? "text-2xl" : "text-3xl"}`}>
             {mode === "signup"
               ? "Créer un compte"
               : mode === "forgot"
                 ? "Mot de passe oublié"
                 : "Bienvenue"}
           </h1>
-          <p className="text-slate-500 mt-2">
-            {mode === "signup"
-              ? "Créez votre espace SEO BI en quelques secondes."
-              : mode === "forgot"
-                ? "Entrez votre email — nous vous enverrons un lien pour réinitialiser votre mot de passe."
+          {!isSignup && (
+            <p className="text-slate-500 mt-2">
+              {mode === "forgot"
+                ? "Entrez votre email nous vous enverrons un lien pour réinitialiser votre mot de passe."
                 : "Connectez-vous à votre espace SEO BI"}
-          </p>
+            </p>
+          )}
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
+        <form onSubmit={handleSubmit} className={isSignup ? "space-y-3" : "space-y-6"}>
           {mode === "signup" && (
-            <div className="flex flex-col items-center gap-3">
+            <div className="flex flex-col items-center gap-1.5">
               <div className="relative group">
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="w-24 h-24 rounded-full bg-slate-100 border-2 border-dashed border-slate-300 hover:border-indigo-500 hover:bg-indigo-50 transition-all flex items-center justify-center overflow-hidden focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  className="w-16 h-16 rounded-full bg-slate-100 border-2 border-dashed border-slate-300 hover:border-indigo-500 hover:bg-indigo-50 transition-all flex items-center justify-center overflow-hidden focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   title="Ajouter une photo"
                 >
                   {avatar ? (
                     <img src={avatar} alt="Aperçu" className="w-full h-full object-cover" />
                   ) : (
-                    <Camera className="w-7 h-7 text-slate-400 group-hover:text-indigo-500 transition-colors" />
+                    <Camera className="w-5 h-5 text-slate-400 group-hover:text-indigo-500 transition-colors" />
                   )}
                 </button>
                 {avatar && (
                   <button
                     type="button"
                     onClick={() => setAvatar(null)}
-                    className="absolute -top-1 -right-1 w-6 h-6 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-md transition-all"
+                    className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-md transition-all"
                     title="Retirer la photo"
                   >
-                    <X className="w-3.5 h-3.5" />
+                    <X className="w-3 h-3" />
                   </button>
                 )}
               </div>
-              <p className="text-xs text-slate-400 text-center">
-                {avatar ? "Photo prête" : "Ajouter une photo (optionnel)"}
+              <p className="text-[11px] text-slate-400 text-center">
+                {avatar ? "Photo prête" : "Photo (optionnel)"}
               </p>
               <input
                 ref={fileInputRef}
@@ -190,15 +192,17 @@ export default function Login({ onLogin }: LoginProps) {
             </div>
           )}
 
-          <div className="space-y-2">
+          <div className={isSignup ? "space-y-1" : "space-y-2"}>
             <label className="text-sm font-semibold text-slate-700 ml-1">Email</label>
             <div className="relative">
-              <Mail className="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+              <Mail className={`absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 ${isSignup ? "w-4 h-4" : "w-5 h-5"}`} />
               <input
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full pl-12 pr-4 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none text-slate-900"
+                className={`w-full pl-11 pr-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none text-slate-900 ${
+                  isSignup ? "py-2.5 text-sm" : "py-3.5"
+                }`}
                 placeholder="nom@exemple.com"
                 required
                 autoComplete="email"
@@ -207,16 +211,18 @@ export default function Login({ onLogin }: LoginProps) {
           </div>
 
           {mode !== "forgot" && (
-            <div className="space-y-2">
+            <div className={isSignup ? "space-y-1" : "space-y-2"}>
               <label className="text-sm font-semibold text-slate-700 ml-1">Mot de passe</label>
               <div className="relative">
-                <Lock className="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                <Lock className={`absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 ${isSignup ? "w-4 h-4" : "w-5 h-5"}`} />
                 <input
                   type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="w-full pl-12 pr-12 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none text-slate-900"
-                  placeholder="••••••••"
+                  className={`w-full pl-11 pr-11 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none text-slate-900 ${
+                    isSignup ? "py-2.5 text-sm" : "py-3.5"
+                  }`}
+                  placeholder={isSignup ? "Min. 6 caractères" : "••••••••"}
                   required
                   minLength={isSignup ? 6 : undefined}
                   autoComplete={isSignup ? "new-password" : "current-password"}
@@ -226,25 +232,26 @@ export default function Login({ onLogin }: LoginProps) {
                   onClick={() => setShowPassword(!showPassword)}
                   className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
                 >
-                  {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                  {showPassword ? (
+                    <EyeOff className={isSignup ? "w-4 h-4" : "w-5 h-5"} />
+                  ) : (
+                    <Eye className={isSignup ? "w-4 h-4" : "w-5 h-5"} />
+                  )}
                 </button>
               </div>
-              {isSignup && (
-                <p className="text-xs text-slate-400 ml-1">Minimum 6 caractères.</p>
-              )}
             </div>
           )}
 
           {isSignup && (
-            <div className="space-y-2">
+            <div className="space-y-1">
               <label className="text-sm font-semibold text-slate-700 ml-1">Confirmer le mot de passe</label>
               <div className="relative">
-                <Lock className="w-5 h-5 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                <Lock className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
                   type={showPassword ? "text" : "password"}
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="w-full pl-12 pr-4 py-3.5 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none text-slate-900"
+                  className="w-full pl-11 pr-4 py-2.5 text-sm bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none text-slate-900"
                   placeholder="••••••••"
                   required
                   autoComplete="new-password"
@@ -292,16 +299,18 @@ export default function Login({ onLogin }: LoginProps) {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold shadow-lg shadow-indigo-200 transition-all flex items-center justify-center gap-2 group disabled:opacity-70"
+            className={`w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-bold shadow-lg shadow-indigo-200 transition-all flex items-center justify-center gap-2 group disabled:opacity-70 ${
+              isSignup ? "py-3" : "py-4"
+            }`}
           >
             {loading
               ? mode === "signup" ? "Création..." : mode === "forgot" ? "Envoi..." : "Connexion..."
               : mode === "signup" ? "Créer mon compte" : mode === "forgot" ? "Envoyer le lien" : "Se connecter"}
-            <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+            <ArrowRight className={`group-hover:translate-x-1 transition-transform ${isSignup ? "w-4 h-4" : "w-5 h-5"}`} />
           </button>
         </form>
 
-        <div className="mt-8 text-center text-sm text-slate-500">
+        <div className={`text-center text-sm text-slate-500 ${isSignup ? "mt-4" : "mt-8"}`}>
           {mode === "signup" ? (
             <>
               Déjà un compte ?{" "}

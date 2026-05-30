@@ -429,8 +429,6 @@ export default function Opportunities() {
     [data]
   );
 
-  const topOpportunity = filteredData[0];
-
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
@@ -552,34 +550,6 @@ export default function Opportunities() {
           </div>
         );
       })()}
-
-      {/* ── Top opportunity callout ───────────────────────────────────────── */}
-      {!loading && topOpportunity && Number(topOpportunity.opportunity_score || 0) > 0 && (
-        <div className="bg-gradient-to-r from-indigo-600 to-indigo-500 rounded-3xl p-6 text-white shadow-lg shadow-indigo-100">
-          <div className="flex items-start justify-between gap-6 flex-wrap">
-            <div className="flex items-start gap-4">
-              <div className="w-12 h-12 bg-white/20 backdrop-blur rounded-2xl flex items-center justify-center shrink-0">
-                <Zap className="w-6 h-6" />
-              </div>
-              <div>
-                <div className="text-indigo-100 text-[10px] font-bold uppercase tracking-widest mb-1">
-                  Opportunité prioritaire
-                </div>
-                <div className="text-xl font-bold">"{topOpportunity.keyword}"</div>
-                <p className="text-sm text-indigo-100 mt-1">
-                  Position #{Number(topOpportunity.position || 0).toFixed(0)} ·{" "}
-                  {formatImpressions(Number(topOpportunity.impressions || 0))} impressions ·{" "}
-                  Intention {(topOpportunity.search_intent ?? "—").toString().slice(0, 6)}
-                </p>
-              </div>
-            </div>
-            <div className="text-right">
-              <div className="text-3xl font-bold">+{Math.round(Number(topOpportunity.opportunity_score || 0))}</div>
-              <div className="text-xs text-indigo-100 font-medium uppercase tracking-wider">clics potentiels</div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── Table card ─────────────────────────────────────────────────────── */}
       <div className="bg-white rounded-[2.5rem] border border-slate-100 shadow-sm overflow-hidden flex flex-col">

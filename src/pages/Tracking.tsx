@@ -357,28 +357,26 @@ export default function Tracking() {
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+        <div>
+          <table className="w-full text-left border-collapse table-fixed">
             <thead>
-              <tr className="text-slate-400 text-[10px] uppercase tracking-wider font-bold border-b border-slate-100">
-                <th className="px-6 py-4">Mot-clé</th>
-                <th className="px-6 py-4">Date début opti.</th>
-                <th className="px-6 py-4">Position</th>
-                <th className="px-6 py-4">Évolution</th>
-                <th className="px-6 py-4">Impressions</th>
-                <th className="px-6 py-4">Clics</th>
-                <th className="px-6 py-4">CTR</th>
-                <th className="px-6 py-4">CTR Gap</th>
-                <th className="px-6 py-4">Gain potentiel</th>
-                <th className="px-6 py-4">Statut</th>
-                <th className="px-6 py-4 text-right">Action</th>
+              <tr className="text-slate-400 text-[10px] uppercase tracking-wide font-bold border-b border-slate-100">
+                <th className="px-3 py-3 w-[14%]">Mot-clé</th>
+                <th className="px-3 py-3 w-[11%]">Date opti.</th>
+                <th className="px-3 py-3 w-[10%]">Position</th>
+                <th className="px-3 py-3 w-[10%]">Impressions</th>
+                <th className="px-3 py-3 w-[9%]">Clics</th>
+                <th className="px-3 py-3 w-[10%]">CTR</th>
+                <th className="px-3 py-3 w-[13%]">Gain potentiel</th>
+                <th className="px-3 py-3 w-[12%]">Statut</th>
+                <th className="px-3 py-3 w-[11%] text-right">Action</th>
               </tr>
             </thead>
 
             <tbody className="divide-y divide-slate-50">
               {loading ? (
                 <tr>
-                  <td colSpan={11} className="px-6 py-10 text-center text-slate-400">
+                  <td colSpan={9} className="px-3 py-10 text-center text-slate-400">
                     <div className="inline-flex items-center gap-2">
                       <Loader2 className="w-4 h-4 animate-spin" />
                       Chargement...
@@ -387,7 +385,7 @@ export default function Tracking() {
                 </tr>
               ) : filteredData.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="px-6 py-16 text-center">
+                  <td colSpan={9} className="px-3 py-16 text-center">
                     <div className="flex flex-col items-center gap-3 text-slate-400">
                       <TrendingUp className="w-8 h-8 opacity-40" />
                       <p className="font-medium">Aucun mot-clé suivi.</p>
@@ -445,9 +443,9 @@ export default function Tracking() {
                       }`}
                     >
                       {/* Keyword */}
-                      <td className="px-6 py-4 max-w-[180px]">
-                        <div className="font-bold text-slate-900 truncate">{k.keyword}</div>
-                        <div className="flex items-center gap-1 mt-0.5">
+                      <td className="px-3 py-3">
+                        <div className="font-bold text-slate-900 truncate" title={k.keyword}>{k.keyword}</div>
+                        <div className="flex items-center gap-1 mt-0.5 flex-wrap">
                           {intentKey && INTENT_CLS[intentKey] && (
                             <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${INTENT_CLS[intentKey]}`}>
                               {intentKey === "transactionnelle" ? "Transac." : intentKey === "navigationnelle" ? "Nav." : "Info."}
@@ -462,13 +460,13 @@ export default function Tracking() {
                       </td>
 
                       {/* Date début optimisation (saisie manuelle par l'analyste) */}
-                      <td className="px-6 py-4">
+                      <td className="px-3 py-3">
                         <input
                           type="date"
                           value={optStart}
                           disabled={isSavingDate}
                           onChange={(e) => handleSetOptimizationDate(k.id, e.target.value)}
-                          className="px-2 py-1 text-xs bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="w-full px-1.5 py-1 text-xs bg-white border border-slate-200 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
                           title={
                             hasBaseline && baselineDate && baselineDate !== optStart
                               ? `Baseline réelle : ${baselineDate} (1ʳᵉ donnée disponible ≥ ${optStart})`
@@ -478,7 +476,7 @@ export default function Tracking() {
                           }
                         />
                         {hasBaseline && baselineDate && baselineDate !== optStart && (
-                          <div className="text-[9px] text-slate-400 mt-1">
+                          <div className="text-[9px] text-slate-400 mt-1 truncate">
                             data: {baselineDate}
                           </div>
                         )}
@@ -489,43 +487,36 @@ export default function Tracking() {
                         )}
                       </td>
 
-                      {/* Position */}
-                      <td className="px-6 py-4">
+                      {/* Position + Évolution (fusionnés) */}
+                      <td className="px-3 py-3">
                         {isRefreshing ? (
                           <div className="h-5 w-10 bg-slate-200 rounded animate-pulse" />
                         ) : (
                           <>
-                            <div className="text-lg font-bold text-slate-900">
-                              {pos > 0 ? `#${pos.toFixed(0)}` : "–"}
+                            <div className="flex items-baseline gap-1.5">
+                              <span className="text-base font-bold text-slate-900">
+                                {pos > 0 ? `#${pos.toFixed(0)}` : "–"}
+                              </span>
+                              {prevPos > 0 && (
+                                <span className={`inline-flex items-center text-[11px] font-bold ${
+                                  posDiff > 0 ? "text-emerald-600" : posDiff < 0 ? "text-red-600" : "text-slate-400"
+                                }`}>
+                                  {posDiff > 0 ? <ArrowUp className="w-3 h-3" /> : posDiff < 0 ? <ArrowDown className="w-3 h-3" /> : <Minus className="w-3 h-3" />}
+                                  {Math.abs(posDiff).toFixed(0)}
+                                </span>
+                              )}
                             </div>
                             {prevPos > 0 && (
-                              <div className="text-[10px] text-slate-400">
-                                vs #{prevPos.toFixed(0)}
-                                {hasBaseline ? " (baseline)" : ""}
+                              <div className="text-[10px] text-slate-400 truncate">
+                                vs #{prevPos.toFixed(0)}{hasBaseline ? " (base)" : ""}
                               </div>
                             )}
                           </>
                         )}
                       </td>
 
-                      {/* Evolution */}
-                      <td className="px-6 py-4">
-                        {isRefreshing ? (
-                          <div className="h-4 w-12 bg-slate-200 rounded animate-pulse" />
-                        ) : prevPos > 0 ? (
-                          <div className={`flex items-center gap-1 text-sm font-bold ${
-                            posDiff > 0 ? "text-emerald-600" : posDiff < 0 ? "text-red-600" : "text-slate-400"
-                          }`}>
-                            {posDiff > 0 ? <ArrowUp className="w-4 h-4" /> : posDiff < 0 ? <ArrowDown className="w-4 h-4" /> : <Minus className="w-4 h-4" />}
-                            {Math.abs(posDiff).toFixed(1)}
-                          </div>
-                        ) : (
-                          <span className="text-slate-300 text-sm">–</span>
-                        )}
-                      </td>
-
                       {/* Impressions (delta vs baseline si date d'opti définie) */}
-                      <td className="px-6 py-4">
+                      <td className="px-3 py-3">
                         {isRefreshing ? (
                           <div className="h-4 w-12 bg-slate-200 rounded animate-pulse" />
                         ) : (
@@ -536,8 +527,8 @@ export default function Tracking() {
                             {hasBaseline && (baselineImp > 0 || impressions > 0) && (
                               <div className={`text-[10px] font-bold ${
                                 impDiff > 0 ? "text-emerald-600" : impDiff < 0 ? "text-red-600" : "text-slate-400"
-                              }`}>
-                                {impDiff > 0 ? "+" : ""}{formatNum(Math.abs(impDiff))} vs baseline
+                              }`} title="Variation vs baseline">
+                                {impDiff > 0 ? "+" : ""}{formatNum(Math.abs(impDiff))}
                               </div>
                             )}
                           </>
@@ -545,7 +536,7 @@ export default function Tracking() {
                       </td>
 
                       {/* Clicks (delta vs baseline si date d'opti définie) */}
-                      <td className="px-6 py-4">
+                      <td className="px-3 py-3">
                         {isRefreshing ? (
                           <div className="h-4 w-10 bg-slate-200 rounded animate-pulse" />
                         ) : (
@@ -556,16 +547,16 @@ export default function Tracking() {
                             {hasBaseline && (baselineClk > 0 || clicks > 0) && (
                               <div className={`text-[10px] font-bold ${
                                 clkDiff > 0 ? "text-emerald-600" : clkDiff < 0 ? "text-red-600" : "text-slate-400"
-                              }`}>
-                                {clkDiff > 0 ? "+" : ""}{formatNum(Math.abs(clkDiff))} vs baseline
+                              }`} title="Variation vs baseline">
+                                {clkDiff > 0 ? "+" : ""}{formatNum(Math.abs(clkDiff))}
                               </div>
                             )}
                           </>
                         )}
                       </td>
 
-                      {/* CTR */}
-                      <td className="px-6 py-4">
+                      {/* CTR + CTR Gap (fusionnés) */}
+                      <td className="px-3 py-3">
                         {isRefreshing ? (
                           <div className="h-4 w-12 bg-slate-200 rounded animate-pulse" />
                         ) : (
@@ -573,36 +564,26 @@ export default function Tracking() {
                             <div className="text-sm font-bold text-slate-900">
                               {ctr > 0 ? `${(ctr * 100).toFixed(1)}%` : <span className="text-slate-300">–</span>}
                             </div>
-                            {prevCtr > 0 && ctrDiff !== 0 && (
-                              <div className={`text-[10px] font-bold ${ctrDiff > 0 ? "text-emerald-600" : "text-red-600"}`}>
-                                {ctrDiff > 0 ? "+" : ""}{(ctrDiff * 100).toFixed(1)}%
+                            {gap !== 0 && (
+                              <div
+                                className={`text-[10px] font-bold ${
+                                  gap >= -0.02 ? "text-emerald-600" : gap >= -0.07 ? "text-amber-600" : "text-red-600"
+                                }`}
+                                title="Écart au CTR attendu par position"
+                              >
+                                gap {gap > 0 ? "+" : ""}{(gap * 100).toFixed(1)}%
                               </div>
                             )}
                           </>
                         )}
                       </td>
 
-                      {/* CTR Gap */}
-                      <td className="px-6 py-4">
-                        {isRefreshing ? (
-                          <div className="h-4 w-14 bg-slate-200 rounded animate-pulse" />
-                        ) : gap !== 0 ? (
-                          <span className={`text-xs font-bold ${
-                            gap >= -0.02 ? "text-emerald-600" : gap >= -0.07 ? "text-amber-600" : "text-red-600"
-                          }`}>
-                            {gap > 0 ? "+" : ""}{(gap * 100).toFixed(1)}%
-                          </span>
-                        ) : (
-                          <span className="text-slate-300 text-xs">–</span>
-                        )}
-                      </td>
-
                       {/* Opportunity score */}
-                      <td className="px-6 py-4">
+                      <td className="px-3 py-3">
                         {isRefreshing ? (
                           <div className="h-6 w-20 bg-slate-200 rounded-lg animate-pulse" />
                         ) : score > 0 ? (
-                          <span className={`px-2 py-1 rounded-lg text-xs font-bold border ${
+                          <span className={`inline-block px-2 py-1 rounded-lg text-[11px] font-bold border whitespace-nowrap ${
                             score >= 200 ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
                             score >= 50  ? "bg-amber-50 text-amber-700 border-amber-200" :
                                            "bg-slate-50 text-slate-600 border-slate-200"
@@ -615,11 +596,11 @@ export default function Tracking() {
                       </td>
 
                       {/* Status */}
-                      <td className="px-6 py-4">
+                      <td className="px-3 py-3">
                         {isRefreshing ? (
-                          <div className="h-6 w-24 bg-slate-200 rounded-lg animate-pulse" />
+                          <div className="h-6 w-20 bg-slate-200 rounded-lg animate-pulse" />
                         ) : (
-                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider ${statusCls}`}>
+                          <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wide ${statusCls}`}>
                             <StatusIcon className="w-3 h-3" />
                             {statusLabel}
                           </span>
@@ -627,28 +608,28 @@ export default function Tracking() {
                       </td>
 
                       {/* Actions : refresh GSC ciblé + arrêt du suivi */}
-                      <td className="px-6 py-4 text-right">
-                        <div className="inline-flex items-center gap-1 justify-end">
+                      <td className="px-3 py-3 text-right">
+                        <div className="inline-flex items-center gap-0.5 justify-end">
                           <button
                             onClick={() => handleRefreshGsc(k.id)}
                             disabled={refreshingIds.has(k.id)}
                             title="Rafraîchir les données GSC pour ce mot-clé (latence ~2 jours)"
-                            className="p-2 hover:bg-white hover:shadow-sm rounded-lg text-slate-400 hover:text-indigo-600 transition-all border border-transparent hover:border-slate-100 disabled:opacity-50"
+                            className="p-1.5 hover:bg-white hover:shadow-sm rounded-lg text-slate-400 hover:text-indigo-600 transition-all border border-transparent hover:border-slate-100 disabled:opacity-50"
                           >
                             {refreshingIds.has(k.id)
-                              ? <Loader2 className="w-5 h-5 animate-spin" />
-                              : <RefreshCw className="w-5 h-5" />
+                              ? <Loader2 className="w-4 h-4 animate-spin" />
+                              : <RefreshCw className="w-4 h-4" />
                             }
                           </button>
                           <button
                             onClick={() => handleUntrack(k.id)}
                             disabled={untrackingId === k.id}
                             title="Arrêter le suivi"
-                            className="p-2 hover:bg-white hover:shadow-sm rounded-lg text-slate-400 hover:text-red-600 transition-all border border-transparent hover:border-slate-100 disabled:opacity-50"
+                            className="p-1.5 hover:bg-white hover:shadow-sm rounded-lg text-slate-400 hover:text-red-600 transition-all border border-transparent hover:border-slate-100 disabled:opacity-50"
                           >
                             {untrackingId === k.id
-                              ? <Loader2 className="w-5 h-5 animate-spin" />
-                              : <EyeOff className="w-5 h-5" />
+                              ? <Loader2 className="w-4 h-4 animate-spin" />
+                              : <EyeOff className="w-4 h-4" />
                             }
                           </button>
                         </div>

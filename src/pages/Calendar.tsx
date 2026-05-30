@@ -141,36 +141,36 @@ export default function Calendar() {
   };
 
   return (
-    <div className="max-w-7xl mx-auto space-y-8">
+    <div className="max-w-7xl mx-auto space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Calendrier SEO</h1>
-          <p className="text-slate-500 mt-1">Planifiez vos actions et anticipez les saisonnalités.</p>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Calendrier SEO</h1>
+          <p className="text-slate-500 text-sm mt-0.5">Planifiez vos actions et anticipez les saisonnalités.</p>
         </div>
-        <div className="flex items-center gap-4 flex-wrap">
+        <div className="flex items-center gap-3 flex-wrap">
           <div className="flex bg-white p-1 rounded-xl border border-slate-200 shadow-sm">
             <button
               onClick={() => setCurrentDate(subMonths(currentDate, 1))}
-              className="p-2 hover:bg-slate-50 rounded-lg transition-all text-slate-500"
+              className="p-1.5 hover:bg-slate-50 rounded-lg transition-all text-slate-500"
             >
-              <ChevronLeft className="w-5 h-5" />
+              <ChevronLeft className="w-4 h-4" />
             </button>
-            <div className="px-4 py-2 font-bold text-slate-900 min-w-[150px] text-center capitalize">
+            <div className="px-3 py-1.5 text-sm font-bold text-slate-900 min-w-[120px] text-center capitalize">
               {format(currentDate, "MMMM yyyy", { locale: fr })}
             </div>
             <button
               onClick={() => setCurrentDate(addMonths(currentDate, 1))}
-              className="p-2 hover:bg-slate-50 rounded-lg transition-all text-slate-500"
+              className="p-1.5 hover:bg-slate-50 rounded-lg transition-all text-slate-500"
             >
-              <ChevronRight className="w-5 h-5" />
+              <ChevronRight className="w-4 h-4" />
             </button>
           </div>
           <button
             onClick={() => setIsModalOpen(true)}
-            className="flex items-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all active:scale-95"
+            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all active:scale-95"
           >
-            <Plus className="w-5 h-5" />
+            <Plus className="w-4 h-4" />
             Nouvel événement
           </button>
         </div>
@@ -178,76 +178,92 @@ export default function Calendar() {
 
       {/* Error banner */}
       {error && (
-        <div className="px-6 py-4 bg-red-50 border border-red-100 rounded-2xl text-red-600 text-sm font-medium">
+        <div className="px-4 py-2.5 bg-red-50 border border-red-100 rounded-xl text-red-600 text-sm font-medium">
           {error}
         </div>
       )}
 
-      {/* Calendar grid */}
-      <div className="bg-white rounded-[2.5rem] border border-slate-100 shadow-sm overflow-hidden">
-        <div className="grid grid-cols-7 border-b border-slate-100">
-          {["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"].map((day) => (
-            <div
-              key={day}
-              className="py-4 text-center text-[10px] font-bold text-slate-400 uppercase tracking-widest"
-            >
-              {day}
-            </div>
-          ))}
-        </div>
-
-        {loading ? (
-          <div className="flex items-center justify-center py-20 gap-3 text-slate-400">
-            <Loader2 className="w-5 h-5 animate-spin" />
-            Chargement...
+      {/* Side-by-side layout: calendar (2/3) + chatbot (1/3) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:items-stretch">
+        {/* Calendar grid — flex-col pour que la grille des jours remplisse toute la hauteur */}
+        <div className="lg:col-span-2 bg-white rounded-3xl border border-slate-100 shadow-sm overflow-hidden flex flex-col min-h-[600px]">
+          <div className="grid grid-cols-7 border-b border-slate-100 shrink-0">
+            {["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"].map((day) => (
+              <div
+                key={day}
+                className="py-2 text-center text-[9px] font-bold text-slate-400 uppercase tracking-widest"
+              >
+                {day}
+              </div>
+            ))}
           </div>
-        ) : (
-          <div className="grid grid-cols-7">
-            {calendarDays.map((day, i) => {
-              const dayEvents = getEventsForDay(day);
-              const isToday = isSameDay(day, new Date());
-              const isCurrentMonth = isSameMonth(day, monthStart);
 
-              return (
-                <div
-                  key={i}
-                  className={`min-h-[140px] p-4 border-r border-b border-slate-50 transition-colors hover:bg-slate-50/30 ${
-                    !isCurrentMonth ? "bg-slate-50/50 opacity-40" : ""
-                  }`}
-                >
+          {loading ? (
+            <div className="flex-1 flex items-center justify-center gap-3 text-slate-400">
+              <Loader2 className="w-5 h-5 animate-spin" />
+              Chargement...
+            </div>
+          ) : (
+            <div
+              className="grid grid-cols-7 flex-1 min-h-0"
+              style={{
+                gridTemplateRows: `repeat(${Math.ceil(calendarDays.length / 7)}, minmax(0, 1fr))`,
+              }}
+            >
+              {calendarDays.map((day, i) => {
+                const dayEvents = getEventsForDay(day);
+                const isToday = isSameDay(day, new Date());
+                const isCurrentMonth = isSameMonth(day, monthStart);
+
+                return (
                   <div
-                    className={`text-sm font-bold mb-2 w-7 h-7 flex items-center justify-center rounded-full ${
-                      isToday
-                        ? "bg-indigo-600 text-white"
-                        : "text-slate-400"
+                    key={i}
+                    className={`p-1.5 border-r border-b border-slate-50 transition-colors hover:bg-slate-50/30 flex flex-col overflow-hidden ${
+                      !isCurrentMonth ? "bg-slate-50/50 opacity-40" : ""
                     }`}
                   >
-                    {format(day, "d")}
-                  </div>
-                  <div className="space-y-1.5">
-                    {dayEvents.map((event, idx) => {
-                      const typeStyle =
-                        EVENT_TYPES[event.type as keyof typeof EVENT_TYPES] ??
-                        EVENT_TYPES["Publication"];
-                      return (
-                        <div
-                          key={idx}
-                          className={`px-2 py-1 rounded-lg text-[10px] font-bold truncate cursor-pointer hover:brightness-95 transition-all ${typeStyle.light} ${typeStyle.text}`}
-                        >
-                          {event.title}
+                    <div
+                      className={`text-xs font-bold mb-1 w-6 h-6 flex items-center justify-center rounded-full shrink-0 ${
+                        isToday
+                          ? "bg-indigo-600 text-white"
+                          : "text-slate-400"
+                      }`}
+                    >
+                      {format(day, "d")}
+                    </div>
+                    <div className="space-y-1 flex-1 overflow-hidden">
+                      {dayEvents.slice(0, 3).map((event, idx) => {
+                        const typeStyle =
+                          EVENT_TYPES[event.type as keyof typeof EVENT_TYPES] ??
+                          EVENT_TYPES["Publication"];
+                        return (
+                          <div
+                            key={idx}
+                            title={event.title}
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-bold truncate cursor-pointer hover:brightness-95 transition-all ${typeStyle.light} ${typeStyle.text}`}
+                          >
+                            {event.title}
+                          </div>
+                        );
+                      })}
+                      {dayEvents.length > 3 && (
+                        <div className="text-[9px] text-slate-400 font-medium px-1.5">
+                          +{dayEvents.length - 3}
                         </div>
-                      );
-                    })}
+                      )}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
-      {/* AI Assistant — conversational, streaming, project-context aware */}
-      <SeasonalAssistant projects={projects} />
+        {/* AI Assistant — chatbot panel beside the calendar */}
+        <div className="lg:col-span-1">
+          <SeasonalAssistant projects={projects} />
+        </div>
+      </div>
 
       {/* Modal */}
       <AnimatePresence>

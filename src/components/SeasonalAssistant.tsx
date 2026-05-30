@@ -253,23 +253,22 @@ export default function SeasonalAssistant({ projects }: Props) {
   const isEmpty = messages.length === 0 && !streamingText;
 
   return (
-    <div className="bg-white rounded-[2.5rem] border border-slate-100 shadow-sm relative overflow-hidden">
-      {/* Decorative blurs */}
-      <div className="absolute -right-20 -bottom-20 w-72 h-72 bg-indigo-100/40 rounded-full blur-[80px] pointer-events-none" />
-      <div className="absolute -left-20 -top-20 w-56 h-56 bg-blue-100/40 rounded-full blur-[60px] pointer-events-none" />
+    <div className="bg-white rounded-3xl border border-slate-100 shadow-sm relative overflow-hidden flex flex-col h-full min-h-[600px]">
+      {/* Decorative blur — discret en mode compact */}
+      <div className="absolute -right-12 -bottom-12 w-40 h-40 bg-indigo-100/40 rounded-full blur-[50px] pointer-events-none" />
 
-      {/* Header */}
-      <div className="relative z-10 flex items-center justify-between gap-4 p-8 lg:p-10 pb-6 border-b border-slate-100">
-        <div className="flex items-center gap-4 min-w-0">
-          <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-indigo-200 shrink-0">
-            <Sparkles className="w-6 h-6" />
+      {/* Header — compact chatbot style */}
+      <div className="relative z-10 flex items-center justify-between gap-2 p-4 border-b border-slate-100 shrink-0">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-8 h-8 bg-indigo-600 rounded-xl flex items-center justify-center text-white shadow-md shadow-indigo-200 shrink-0">
+            <Sparkles className="w-4 h-4" />
           </div>
           <div className="min-w-0">
-            <h3 className="text-2xl font-bold text-slate-900 tracking-tight truncate">
-              Assistant SEO saisonnier
+            <h3 className="text-sm font-bold text-slate-900 tracking-tight truncate">
+              Assistant SEO
             </h3>
-            <p className="text-slate-500 text-sm mt-1">
-              Décrivez votre besoin, l'IA identifie les opportunités saisonnières pour vous.
+            <p className="text-[10px] text-slate-500 truncate">
+              Conseils saisonniers par l'IA
             </p>
           </div>
         </div>
@@ -278,33 +277,28 @@ export default function SeasonalAssistant({ projects }: Props) {
           <button
             onClick={handleReset}
             disabled={isStreaming}
-            className="shrink-0 inline-flex items-center gap-2 px-4 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-sm font-bold text-slate-600 transition-all disabled:opacity-50"
-            title="Effacer la conversation et recommencer"
+            className="shrink-0 inline-flex items-center justify-center w-8 h-8 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg text-slate-600 transition-all disabled:opacity-50"
+            title="Nouvelle conversation"
           >
-            <RotateCcw className="w-4 h-4" />
-            Nouvelle conversation
+            <RotateCcw className="w-3.5 h-3.5" />
           </button>
         )}
       </div>
 
-      {/* Conversation area */}
+      {/* Conversation area — flex-1 pour remplir l'espace dispo */}
       <div
         ref={scrollRef}
-        className="relative z-10 px-8 lg:px-10 py-6 min-h-[260px] max-h-[480px] overflow-y-auto"
+        className="relative z-10 px-3 py-3 flex-1 overflow-y-auto min-h-0"
       >
         {isEmpty ? (
-          <div className="py-10 px-4 text-center border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50/50">
-            <Sparkles className="w-8 h-8 text-indigo-300 mx-auto mb-3" />
-            <p className="text-slate-600 font-medium max-w-md mx-auto">
-              Posez une question stratégique : événements saisonniers, contenus à anticiper,
-              tendances locales, mots-clés à cibler avant un pic.
-            </p>
-            <p className="text-slate-400 text-xs mt-2 max-w-md mx-auto">
-              Exemple : <em>"Trouve des événements saisonniers pour une parapharmacie en France avant l'été."</em>
+          <div className="py-6 px-3 text-center border border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
+            <Sparkles className="w-6 h-6 text-indigo-300 mx-auto mb-2" />
+            <p className="text-slate-600 text-xs font-medium">
+              Posez une question : événements saisonniers, contenus à anticiper, mots-clés à cibler.
             </p>
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-3">
             <AnimatePresence initial={false}>
               {messages.map((m, i) => (
                 <motion.div
@@ -314,16 +308,16 @@ export default function SeasonalAssistant({ projects }: Props) {
                   className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
                 >
                   <div
-                    className={`max-w-[85%] rounded-2xl px-5 py-3.5 ${
+                    className={`max-w-[90%] rounded-2xl px-3 py-2 ${
                       m.role === "user"
                         ? "bg-indigo-600 text-white rounded-tr-sm"
                         : "bg-slate-50 border border-slate-100 text-slate-700 rounded-tl-sm"
                     }`}
                   >
                     {m.role === "user" ? (
-                      <p className="whitespace-pre-wrap text-sm leading-relaxed">{m.content}</p>
+                      <p className="whitespace-pre-wrap text-xs leading-relaxed">{m.content}</p>
                     ) : (
-                      <div className="prose prose-sm prose-slate max-w-none markdown-body">
+                      <div className="prose prose-xs prose-slate max-w-none markdown-body text-xs">
                         <Markdown>{m.content}</Markdown>
                       </div>
                     )}
@@ -339,14 +333,14 @@ export default function SeasonalAssistant({ projects }: Props) {
                 animate={{ opacity: 1, y: 0 }}
                 className="flex justify-start"
               >
-                <div className="max-w-[85%] rounded-2xl rounded-tl-sm px-5 py-3.5 bg-slate-50 border border-slate-100 text-slate-700">
+                <div className="max-w-[90%] rounded-2xl rounded-tl-sm px-3 py-2 bg-slate-50 border border-slate-100 text-slate-700">
                   {streamingText ? (
-                    <div className="prose prose-sm prose-slate max-w-none markdown-body">
+                    <div className="prose prose-xs prose-slate max-w-none markdown-body text-xs">
                       <Markdown>{streamingText}</Markdown>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2 text-slate-400 text-sm">
-                      <Loader2 className="w-4 h-4 animate-spin" />
+                    <div className="flex items-center gap-2 text-slate-400 text-xs">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       L'IA réfléchit...
                     </div>
                   )}
@@ -358,84 +352,74 @@ export default function SeasonalAssistant({ projects }: Props) {
 
         {/* Error banner */}
         {error && (
-          <div className="mt-4 px-4 py-3 bg-red-50 border border-red-200 rounded-2xl text-red-700 text-sm font-medium flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <div className="mt-3 px-3 py-2 bg-red-50 border border-red-200 rounded-xl text-red-700 text-xs font-medium flex items-start gap-2">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
         )}
       </div>
 
-      {/* Footer: chips + input */}
-      <div className="relative z-10 border-t border-slate-100 p-6 lg:p-8 bg-white/60 backdrop-blur space-y-4">
+      {/* Footer: chips + input — compact */}
+      <div className="relative z-10 border-t border-slate-100 p-3 bg-white/60 backdrop-blur space-y-2 shrink-0">
         {/* Dynamic chips — visible only when conversation is empty */}
         {isEmpty && (
-          <div>
-            <div className="text-[10px] uppercase tracking-wider font-bold text-slate-500 mb-2 ml-1">
-              💡 Suggestions du moment
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {chips.map((chip, i) => (
-                <motion.button
-                  key={chip.label}
-                  initial={{ opacity: 0, y: 6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.04 }}
-                  onClick={() => handleChipClick(chip)}
-                  disabled={isStreaming}
-                  className="px-3.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 text-indigo-700 rounded-full text-xs font-bold transition-all disabled:opacity-50"
-                >
-                  {chip.label}
-                </motion.button>
-              ))}
-            </div>
+          <div className="flex flex-wrap gap-1.5">
+            {chips.slice(0, 4).map((chip, i) => (
+              <motion.button
+                key={chip.label}
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.04 }}
+                onClick={() => handleChipClick(chip)}
+                disabled={isStreaming}
+                className="px-2 py-0.5 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 text-indigo-700 rounded-full text-[10px] font-bold transition-all disabled:opacity-50"
+              >
+                {chip.label}
+              </motion.button>
+            ))}
           </div>
         )}
 
         {/* Project context toggle — only meaningful if a project is selected */}
         {selectedProject && (
           <label
-            className={`flex items-center gap-3 px-4 py-2.5 rounded-xl border cursor-pointer transition-all ${
+            className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border cursor-pointer transition-all ${
               useProjectContext
                 ? "bg-indigo-50 border-indigo-200"
                 : "bg-slate-50 border-slate-200 hover:border-slate-300"
             }`}
-            title="Injecte les mots-clés, position et marque du projet dans le prompt envoyé à l'IA"
+            title="Injecte les mots-clés et la marque du projet dans le prompt"
           >
             <input
               type="checkbox"
               checked={useProjectContext}
               onChange={(e) => setUseProjectContext(e.target.checked)}
               disabled={isStreaming}
-              className="w-4 h-4 accent-indigo-600"
+              className="w-3.5 h-3.5 accent-indigo-600"
             />
-            <Database className={`w-4 h-4 ${useProjectContext ? "text-indigo-600" : "text-slate-400"}`} />
-            <span className={`text-sm font-medium ${useProjectContext ? "text-indigo-700" : "text-slate-600"}`}>
-              Utiliser le contexte du projet{" "}
-              <strong className={useProjectContext ? "text-indigo-900" : "text-slate-700"}>
-                « {selectedProject.name} »
-              </strong>
+            <Database className={`w-3.5 h-3.5 ${useProjectContext ? "text-indigo-600" : "text-slate-400"}`} />
+            <span className={`text-[11px] font-medium truncate ${useProjectContext ? "text-indigo-700" : "text-slate-600"}`}>
+              Contexte « {selectedProject.name} »
             </span>
           </label>
         )}
 
         {/* Turn-limit banner */}
         {reachedLimit && (
-          <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-sm font-medium flex items-center justify-between gap-3 flex-wrap">
-            <span>
-              Limite de {MAX_TURNS} tours atteinte — démarrez une nouvelle conversation pour continuer.
-            </span>
+          <div className="px-2 py-1.5 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-[11px] font-medium flex items-center justify-between gap-2 flex-wrap">
+            <span>Limite {MAX_TURNS} tours atteinte</span>
             <button
               onClick={handleReset}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-lg transition-all"
+              className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-bold rounded-md"
             >
-              <RotateCcw className="w-3.5 h-3.5" />
-              Recommencer
+              <RotateCcw className="w-3 h-3" />
+              Reset
             </button>
           </div>
         )}
 
         {/* Input row */}
-        <div className="flex items-end gap-3">
+        <div className="flex items-end gap-2">
           <div className="flex-1 relative">
             <textarea
               ref={textareaRef}
@@ -444,43 +428,38 @@ export default function SeasonalAssistant({ projects }: Props) {
               onKeyDown={handleKeyDown}
               placeholder={
                 reachedLimit
-                  ? "Limite de conversation atteinte"
-                  : "Posez votre question stratégique..."
+                  ? "Limite atteinte"
+                  : "Votre question..."
               }
               disabled={isStreaming || reachedLimit}
               rows={1}
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all resize-none disabled:opacity-60"
+              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-900 placeholder:text-slate-400 focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition-all resize-none disabled:opacity-60"
             />
           </div>
 
           {isStreaming ? (
             <button
               onClick={handleStop}
-              className="shrink-0 inline-flex items-center justify-center w-12 h-12 bg-slate-800 hover:bg-slate-900 text-white rounded-2xl shadow-lg transition-all"
+              className="shrink-0 inline-flex items-center justify-center w-9 h-9 bg-slate-800 hover:bg-slate-900 text-white rounded-xl shadow-md transition-all"
               title="Arrêter la génération"
             >
-              <Square className="w-4 h-4" />
+              <Square className="w-3.5 h-3.5" />
             </button>
           ) : (
             <button
               onClick={() => handleSend()}
               disabled={!input.trim() || reachedLimit}
-              className="shrink-0 inline-flex items-center justify-center w-12 h-12 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl shadow-lg shadow-indigo-100 transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95"
+              className="shrink-0 inline-flex items-center justify-center w-9 h-9 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-md shadow-indigo-100 transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95"
               title="Envoyer (Entrée)"
             >
-              <Send className="w-4 h-4" />
+              <Send className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
 
-        {/* Subtle help line */}
-        <div className="flex items-center justify-between text-[11px] text-slate-400 px-1">
-          <span>
-            {turnCount}/{MAX_TURNS} tours
-          </span>
-          <span className="hidden sm:inline">
-            Entrée pour envoyer · Maj + Entrée pour aller à la ligne
-          </span>
+        {/* Compteur de tours */}
+        <div className="text-[10px] text-slate-400 px-1">
+          {turnCount}/{MAX_TURNS} tours
         </div>
       </div>
     </div>

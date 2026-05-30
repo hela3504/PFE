@@ -583,7 +583,11 @@ export default function Settings() {
                   <div className="min-w-0">
                     <p className="text-sm font-bold text-slate-800 truncate">{profile.email}</p>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      {profileAvatar ? "Nouvelle photo (non enregistrée)" : "Administrateur"}
+                      {profileAvatar
+                        ? "Nouvelle photo (non enregistrée)"
+                        : isAdmin
+                          ? "Administrateur"
+                          : "Utilisateur"}
                     </p>
                   </div>
                 </div>

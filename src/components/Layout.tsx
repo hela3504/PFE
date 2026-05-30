@@ -43,7 +43,7 @@ export default function Layout({ user, onLogout }: LayoutProps) {
     <div className="flex h-screen bg-[#F5F5F5] dark:bg-slate-950 font-sans text-slate-900 dark:text-slate-100">
       {/* Sidebar */}
       <aside className={cn(
-        "bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700 transition-all duration-300 flex flex-col",
+        "bg-white dark:bg-slate-900 border-r border-slate-200 dark:border-slate-700 transition-all duration-300 flex flex-col overflow-hidden",
         isSidebarOpen ? "w-64" : "w-20"
       )}>
         <div className="p-6 flex items-center gap-3">
@@ -116,7 +116,9 @@ export default function Layout({ user, onLogout }: LayoutProps) {
           <div className="flex items-center gap-4">
             <div className="text-right">
               <div className="text-sm font-medium">{user.email}</div>
-              <div className="text-xs text-slate-500">Administrateur</div>
+              <div className="text-xs text-slate-500">
+                {user?.is_admin ? "Administrateur" : "Utilisateur"}
+              </div>
             </div>
             <div className="w-10 h-10 rounded-full overflow-hidden bg-slate-200 flex items-center justify-center font-bold text-slate-600">
               {user.avatar_url ? (
