@@ -4,7 +4,6 @@ import {
   Users,
   MousePointer2,
   BarChart3,
-  AlertCircle,
   ChevronDown,
   Sparkles,
   Loader2,
@@ -31,7 +30,7 @@ import {
   Area,
 } from "recharts";
 import { motion } from "motion/react";
-import { getDashboardInterpretation } from "../services/geminiService";
+import { getDashboardInterpretation } from "../services/aiService";
 import { useSelectedProject } from "../hooks/useSelectedProject";
 import Markdown from "react-markdown";
 
@@ -379,11 +378,6 @@ export default function Dashboard() {
     ...item,
     name: BRAND_LABEL[item.name] ?? item.name,
   }));
-  const alerts = dashboard?.alerts || {
-    strongDrop: 0,
-    toWatch: 0,
-    opportunities: 0,
-  };
 
   if (loading) {
     return (
@@ -1026,29 +1020,6 @@ export default function Dashboard() {
         <div className="absolute -right-20 -top-20 w-64 h-64 bg-indigo-50 rounded-full blur-3xl opacity-50 group-hover:scale-110 transition-transform duration-700" />
       </div>
 
-      <div className="bg-white p-8 rounded-[2.5rem] border border-slate-100 shadow-sm">
-        <div className="flex items-center gap-3 mb-6">
-          <AlertCircle className="w-6 h-6 text-amber-500" />
-          <h3 className="text-xl font-bold text-slate-900">Section Alertes</h3>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="p-4 bg-red-50 border border-red-100 rounded-2xl">
-            <div className="text-red-600 font-bold text-sm mb-1">Forte baisse</div>
-            <div className="text-slate-900 font-bold">{alerts.strongDrop} mots-clés</div>
-            <div className="text-xs text-slate-500 mt-2">Perte de &gt; 5 positions</div>
-          </div>
-          <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl">
-            <div className="text-amber-600 font-bold text-sm mb-1">À surveiller</div>
-            <div className="text-slate-900 font-bold">{alerts.toWatch} mots-clés</div>
-            <div className="text-xs text-slate-500 mt-2">Instabilité détectée</div>
-          </div>
-          <div className="p-4 bg-emerald-50 border border-emerald-100 rounded-2xl">
-            <div className="text-emerald-600 font-bold text-sm mb-1">Opportunités</div>
-            <div className="text-slate-900 font-bold">{alerts.opportunities} nouvelles</div>
-            <div className="text-xs text-slate-500 mt-2">Mots-clés faciles à ranker</div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

@@ -177,20 +177,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def init_db():
     Base.metadata.create_all(bind=engine)
-    seed_user()
     print("Database initialized successfully")
-
-def seed_user():  # Crée un utilisateur admin par défaut s'il n'existe pas
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.email == "admin@example.com").first()
-        if not user:
-            hashed_pw = pwd_context.hash("password123")
-            new_user = User(email="admin@example.com", password=hashed_pw)
-            db.add(new_user)
-            db.commit()
-    finally:
-        db.close()
 
 # Utility Functions (formerly API endpoints)
 def ingest_gsc(project_id: int, data: List[dict]):

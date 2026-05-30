@@ -32,6 +32,7 @@ ZHIPU_API_KEY=...                       # Z.AI key (format: {32hex}.{16alphanum}
 API_KEY_N8N=...                         # x-api-key header for ingest/compute routes
 N8N_BASE_URL=https://...                # n8n instance, used by /api/n8n/trigger/:workflowName
 N8N_RESET_WEBHOOK_URL=...               # specific webhook for /api/opportunities/reset
+N8N_REFRESH_GSC_WEBHOOK_URL=...         # specific webhook for /api/keywords/:id/refresh-gsc (targeted single-keyword refresh)
 ```
 
 The frontend never receives any AI key — all LLM calls go through backend routes. Do not re-introduce `define: { 'process.env.X' }` in `vite.config.ts` for secrets.
@@ -98,7 +99,7 @@ All AI is backend-proxied (no API key in the browser). Routes:
 - `POST /api/ai/dashboard-interpretation` — French SEO analysis paragraph (Dashboard)
 - `POST /api/ai/seasonal-suggestions` — calendar-aware SEO opportunities
 
-`src/services/geminiService.ts` is a misnomer kept for compatibility — it now only forwards to backend routes. The file name does not imply Gemini is in use.
+`src/services/aiService.ts` is the frontend AI proxy — it only forwards to backend routes (Z.AI). Previously named `geminiService.ts`; the historical name has been removed.
 
 JSON-shaped responses use `response_format: { type: "json_object" }`. Z.AI returns 429 *Insufficient balance* when the account has no credits — that error means "fund the Z.AI account," not "code is broken."
 
@@ -106,7 +107,7 @@ JSON-shaped responses use `response_format: { type: "json_object" }`. Z.AI retur
 
 - **User routes**: JWT via `Authorization: Bearer <token>`. `authenticate` middleware attaches `req.user.id`.
 - **Ingest/compute routes**: `x-api-key` header. `checkApiKey` middleware compares against `API_KEY_N8N`.
-- Default seeded user: `admin@example.com` / `password123` (created on `initDb()` if missing).
+- No seeded user. Bootstrap the first admin via the `BOOTSTRAP_ADMIN_EMAIL` env var: sign up via the UI with that email, then restart the server — `initDb()` will promote the matching account to admin (idempotent, never creates the account itself). Alternative: run `UPDATE users SET is_admin = TRUE WHERE email = '<your-email>';` directly on the database.
 - Frontend stores token in `localStorage`; `App.tsx` restores it on mount.
 
 ### Tracking flow (Opportunities → Suivi)

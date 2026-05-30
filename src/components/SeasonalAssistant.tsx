@@ -13,7 +13,7 @@ import Markdown from "react-markdown";
 import {
   streamAssistant,
   type AssistantMessage,
-} from "../services/geminiService";
+} from "../services/aiService";
 import { useSelectedProject } from "../hooks/useSelectedProject";
 
 // ─── Dynamic chips ─────────────────────────────────────────────────────────────

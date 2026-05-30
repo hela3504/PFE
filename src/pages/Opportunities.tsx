@@ -19,7 +19,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { qualifyKeywords } from "../services/geminiService";
+import { qualifyKeywords } from "../services/aiService";
 import { useSelectedProject } from "../hooks/useSelectedProject";
 
 // ─── Types ────────────────────────────────────────────────────────────────────

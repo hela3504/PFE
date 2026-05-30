@@ -65,7 +65,7 @@ export default function Hub() {
   return (
     <div className="max-w-6xl mx-auto">
       <header className="mb-12">
-        <h1 className="text-4xl font-bold text-slate-900 tracking-tight">Tableau de bord central</h1>
+        <h1 className="text-4xl font-bold text-slate-900 tracking-tight">Menu</h1>
         <p className="text-slate-500 mt-2 text-lg">Accédez rapidement à toutes les fonctionnalités de votre cockpit SEO.</p>
       </header>
 

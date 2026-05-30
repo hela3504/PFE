@@ -47,7 +47,18 @@
       "Bash(grep -vE \"^\\\\[dotenv|^\\\\\\(node:|SECURITY WARNING|In the next|To prepare|- If|See https|Use \\\\`node|sslmode\")",
       "Bash(PYTHONIOENCODING=utf-8 python *)",
       "Bash(grep -E \"\\\\\\\\\\\\$|pfe\\\\.docx\")",
-      "Bash(grep -i \"tmp\\\\|~\\\\$\")"
+      "Bash(grep -i \"tmp\\\\|~\\\\$\")",
+      "Bash(claude mcp *)",
+      "PowerShell(& \"C:\\\\Users\\\\USER\\\\AppData\\\\Roaming\\\\npm\\\\claude.cmd\" mcp add --transport http n8n-mcp https://n8n.srv770401.hstgr.cloud/mcp-server/http --header \"Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMzkxZWNjOS0wNDc4LTQ5YjAtYjcwOS0yYzliODg4NGJmMGIiLCJpc3MiOiJuOG4iLCJhdWQiOiJtY3Atc2VydmVyLWFwaSIsImp0aSI6IjNmOGFlMDg1LTRlNTAtNDk2OS05ZGJkLTVmZTYzZmY2YmUwMSIsImlhdCI6MTc3OTMwNzQ2Nn0.pgPvMTNOQf-jFEG0p5zGaJIcxoi1Ebvn9x-FuVidENg\" 2>&1)",
+      "mcp__n8n-mcp__search_workflows",
+      "mcp__n8n-mcp__get_workflow_details",
+      "mcp__n8n-mcp__get_sdk_reference",
+      "mcp__n8n-mcp__validate_workflow",
+      "mcp__n8n-mcp__get_execution",
+      "Bash(curl *)",
+      "mcp__n8n-mcp__execute_workflow",
+      "mcp__n8n-mcp__search_executions",
+      "Bash(git add *)"
     ]
   }
 }

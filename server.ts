@@ -279,32 +279,36 @@ async function initDb() {
       ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
     `);
 
-    // Auto-promote: if no admin exists yet, promote the seeded admin (or, failing
-    // that, the lowest-id user) so the system always has at least one admin.
-    const adminCount = await pool.query("SELECT COUNT(*)::int AS n FROM users WHERE is_admin = TRUE");
-    if (Number(adminCount.rows[0].n) === 0) {
-      const promoted = await pool.query(
-        `UPDATE users SET is_admin = TRUE
-         WHERE id = (
-           SELECT id FROM users
-           WHERE email = 'admin@example.com'
-           ORDER BY id ASC
-           LIMIT 1
-         )
-         RETURNING email`
+    // Bootstrap admin via variable d'env BOOTSTRAP_ADMIN_EMAIL.
+    // Au boot, si la variable est définie ET que l'utilisateur existe déjà en
+    // base (créé via signup), on le promeut admin. Aucune création de compte,
+    // aucune injection de mot de passe : c'est juste un flag is_admin = TRUE
+    // appliqué à un compte existant. Idempotent (relancer le serveur n'a aucun
+    // effet de bord). Si BOOTSTRAP_ADMIN_EMAIL est vide ou que l'email n'existe
+    // pas encore en base, on log et on n'agit pas.
+    const bootstrapAdminEmail = (process.env.BOOTSTRAP_ADMIN_EMAIL || "").toLowerCase().trim();
+    if (bootstrapAdminEmail) {
+      const r = await pool.query(
+        `UPDATE users
+           SET is_admin = TRUE
+         WHERE LOWER(email) = $1
+           AND is_admin = FALSE
+         RETURNING email`,
+        [bootstrapAdminEmail]
       );
-      if (promoted.rows.length === 0) {
-        // No admin@example.com — promote the lowest-id user instead
-        const fallback = await pool.query(
-          `UPDATE users SET is_admin = TRUE
-           WHERE id = (SELECT id FROM users ORDER BY id ASC LIMIT 1)
-           RETURNING email`
-        );
-        if (fallback.rows.length > 0) {
-          console.log(`[initDb] auto-promoted ${fallback.rows[0].email} to admin`);
-        }
+      if (r.rows.length > 0) {
+        console.log(`[initDb] BOOTSTRAP_ADMIN_EMAIL → promoted ${r.rows[0].email} to admin`);
       } else {
-        console.log(`[initDb] auto-promoted ${promoted.rows[0].email} to admin`);
+        const exists = await pool.query(
+          "SELECT id FROM users WHERE LOWER(email) = $1",
+          [bootstrapAdminEmail]
+        );
+        if (exists.rows.length === 0) {
+          console.log(
+            `[initDb] BOOTSTRAP_ADMIN_EMAIL=${bootstrapAdminEmail} : compte non trouvé en base. ` +
+            `Créez-le via /api/auth/signup puis redémarrez le serveur pour le promouvoir.`
+          );
+        }
       }
     }
 
@@ -386,19 +390,6 @@ async function initDb() {
       CREATE UNIQUE INDEX IF NOT EXISTS keywords_uniq_norm
         ON keywords (projectid, (LOWER(immutable_unaccent(keyword))));
     `);
-
-    const userRes = await pool.query(
-      "SELECT * FROM users WHERE email = $1",
-      ["admin@example.com"]
-    );
-
-    if (userRes.rows.length === 0) {
-      const hashed = bcrypt.hashSync("password123", 10);
-      await pool.query(
-        "INSERT INTO users (email, password, is_admin) VALUES ($1, $2, TRUE)",
-        ["admin@example.com", hashed]
-      );
-    }
 
     console.log("Database initialized successfully");
   } catch (err) {
@@ -3077,102 +3068,140 @@ app.post("/api/admin/backfill-nlp", authenticate, async (req: any, res) => {
 // IMPORTANT: literal routes (/api/keywords/tracked) must be registered BEFORE
 // parameterized ones (/api/keywords/:keywordId/...) to avoid future shadowing.
 
+// Requête commune utilisée par GET /api/keywords/tracked et PATCH
+// optimization-start-date. Si keywordId est fourni, ne renvoie que ce mot-clé.
+// position_evolution / impressions_evolution / has_sufficient_history sont
+// calculés à la volée depuis gsc_daily : ils représentent l'écart entre la
+// première ligne GSC ≥ optimization_start_date (baseline) et la dernière ligne
+// GSC disponible (état actuel). Aucune dépendance à scores_daily pour ce calcul.
+async function queryTrackedKeywords(
+  userId: number,
+  projectId: number | null,
+  keywordId: number | null
+) {
+  return pool.query(
+    `
+    WITH latest_gsc AS (
+      SELECT DISTINCT ON (g.projectid, g.keyword)
+        g.projectid, g.keyword, g.date,
+        g.impressions, g.clicks, g.position, g.ctr
+      FROM gsc_daily g
+      ORDER BY g.projectid, g.keyword, g.date DESC
+    ),
+    prev_gsc AS (
+      SELECT DISTINCT ON (g.projectid, g.keyword)
+        g.projectid, g.keyword,
+        g.position AS prev_position,
+        g.ctr     AS prev_ctr
+      FROM gsc_daily g
+      WHERE LEFT(g.date::text, 10)::date <= CURRENT_DATE - INTERVAL '7 days'
+      ORDER BY g.projectid, g.keyword, g.date DESC
+    ),
+    -- Baseline depuis la date manuelle d'optimisation : première ligne GSC
+    -- ≥ optimization_start_date. Spec : si pas de donnée exactement à la date,
+    -- prendre la première disponible après. NULL si la date n'est pas définie.
+    optimization_baseline AS (
+      SELECT DISTINCT ON (g.projectid, g.keyword)
+        g.projectid, g.keyword,
+        -- Cast en texte pour éviter le décalage TZ que le driver pg applique
+        -- lors de la sérialisation JSON des colonnes DATE.
+        to_char(g.date::date, 'YYYY-MM-DD') AS baseline_date,
+        g.position     AS baseline_position,
+        g.ctr          AS baseline_ctr,
+        g.impressions  AS baseline_impressions,
+        g.clicks       AS baseline_clicks
+      FROM gsc_daily g
+      JOIN keywords k2
+        ON k2.projectid = g.projectid AND k2.keyword = g.keyword
+      WHERE k2.optimization_start_date IS NOT NULL
+        AND g.date::date >= k2.optimization_start_date
+      ORDER BY g.projectid, g.keyword, g.date ASC
+    ),
+    latest_scores AS (
+      SELECT DISTINCT ON (sc.projectid, sc.keyword)
+        sc.projectid, sc.keyword,
+        sc.opportunity_score, sc.ctr_gap, sc.performance_drift
+      FROM scores_daily sc
+      ORDER BY sc.projectid, sc.keyword, sc.date DESC
+    ),
+    latest_nlp AS (
+      SELECT DISTINCT ON (n.projectid, n.keyword)
+        n.projectid, n.keyword,
+        n.search_intent, n.branded_status, n.action_hint, n.priority_level
+      FROM nlp_keyword_enrichment n
+      ORDER BY n.projectid, n.keyword, n.date DESC
+    )
+    SELECT
+      k.id,
+      k.projectid AS "projectId",
+      k.keyword,
+      COALESCE(lg.position,     k.position, 0)      AS position,
+      -- Quand optimization_start_date est défini, le baseline remplace le
+      -- prev (semaine glissante) pour position/ctr. Sinon comportement actuel.
+      COALESCE(ob.baseline_position, pg.prev_position, k.prev_position, 0) AS prev_position,
+      COALESCE(lg.ctr,          k.ctr, 0)           AS ctr,
+      COALESCE(ob.baseline_ctr, pg.prev_ctr, k.prev_ctr, 0) AS prev_ctr,
+      COALESCE(lg.impressions,  k.impressions, 0)   AS impressions,
+      COALESCE(lg.clicks, 0)                        AS clicks,
+      -- Baselines exposés uniquement quand la date manuelle est définie
+      ob.baseline_date,
+      ob.baseline_position,
+      ob.baseline_ctr,
+      ob.baseline_impressions,
+      ob.baseline_clicks,
+      -- Cast en texte pour éviter le décalage TZ côté JSON (voir baseline_date).
+      to_char(k.optimization_start_date, 'YYYY-MM-DD') AS optimization_start_date,
+      -- Évolutions calculées depuis l'historique GSC (sans n8n).
+      -- position_evolution > 0 = position dégradée (rang plus loin),
+      -- position_evolution < 0 = amélioration. NULL si pas de baseline.
+      CASE
+        WHEN ob.baseline_position IS NOT NULL AND lg.position IS NOT NULL
+        THEN ROUND((lg.position::numeric - ob.baseline_position::numeric)::numeric, 2)
+        ELSE NULL
+      END AS position_evolution,
+      CASE
+        WHEN ob.baseline_impressions IS NOT NULL AND lg.impressions IS NOT NULL
+        THEN (lg.impressions - ob.baseline_impressions)
+        ELSE NULL
+      END AS impressions_evolution,
+      -- TRUE quand on dispose à la fois d'une baseline ≥ opt_date ET d'une
+      -- ligne courante : la comparaison avant/après est possible.
+      (k.optimization_start_date IS NOT NULL
+        AND ob.baseline_position IS NOT NULL
+        AND lg.position IS NOT NULL)         AS has_sufficient_history,
+      COALESCE(sc.opportunity_score, 0)             AS opportunity_score,
+      COALESCE(sc.ctr_gap, 0)                       AS ctr_gap,
+      COALESCE(sc.performance_drift, 0)             AS performance_drift,
+      COALESCE(ln.search_intent, 'informationnelle') AS search_intent,
+      COALESCE(ln.branded_status, 'non-branded')    AS branded_status,
+      ln.action_hint,
+      ln.priority_level,
+      k.is_tracked
+    FROM keywords k
+    JOIN projects p ON p.id = k.projectid
+    LEFT JOIN latest_gsc           lg ON lg.projectid = k.projectid AND lg.keyword = k.keyword
+    LEFT JOIN prev_gsc             pg ON pg.projectid = k.projectid AND pg.keyword = k.keyword
+    LEFT JOIN optimization_baseline ob ON ob.projectid = k.projectid AND ob.keyword = k.keyword
+    LEFT JOIN latest_scores        sc ON sc.projectid = k.projectid AND sc.keyword = k.keyword
+    LEFT JOIN latest_nlp           ln ON ln.projectid = k.projectid AND ln.keyword = k.keyword
+    WHERE k.is_tracked = TRUE
+      AND p.userid = $1
+      AND ($2::int IS NULL OR k.projectid = $2)
+      AND ($3::int IS NULL OR k.id = $3)
+    ORDER BY COALESCE(sc.opportunity_score, 0) DESC
+    `,
+    [userId, projectId, keywordId]
+  );
+}
+
 app.get("/api/keywords/tracked", authenticate, async (req: any, res) => {
   try {
     const { projectId } = req.query;
-
-    const result = await pool.query(
-      `
-      WITH latest_gsc AS (
-        SELECT DISTINCT ON (g.projectid, g.keyword)
-          g.projectid, g.keyword, g.date,
-          g.impressions, g.clicks, g.position, g.ctr
-        FROM gsc_daily g
-        ORDER BY g.projectid, g.keyword, g.date DESC
-      ),
-      prev_gsc AS (
-        SELECT DISTINCT ON (g.projectid, g.keyword)
-          g.projectid, g.keyword,
-          g.position AS prev_position,
-          g.ctr     AS prev_ctr
-        FROM gsc_daily g
-        WHERE LEFT(g.date::text, 10)::date <= CURRENT_DATE - INTERVAL '7 days'
-        ORDER BY g.projectid, g.keyword, g.date DESC
-      ),
-      -- Baseline depuis la date manuelle d'optimisation : première ligne GSC
-      -- ≥ optimization_start_date. Spec : si pas de donnée exactement à la date,
-      -- prendre la première disponible après. NULL si la date n'est pas définie.
-      optimization_baseline AS (
-        SELECT DISTINCT ON (g.projectid, g.keyword)
-          g.projectid, g.keyword,
-          g.date         AS baseline_date,
-          g.position     AS baseline_position,
-          g.ctr          AS baseline_ctr,
-          g.impressions  AS baseline_impressions,
-          g.clicks       AS baseline_clicks
-        FROM gsc_daily g
-        JOIN keywords k2
-          ON k2.projectid = g.projectid AND k2.keyword = g.keyword
-        WHERE k2.optimization_start_date IS NOT NULL
-          AND g.date::date >= k2.optimization_start_date
-        ORDER BY g.projectid, g.keyword, g.date ASC
-      ),
-      latest_scores AS (
-        SELECT DISTINCT ON (sc.projectid, sc.keyword)
-          sc.projectid, sc.keyword,
-          sc.opportunity_score, sc.ctr_gap, sc.performance_drift
-        FROM scores_daily sc
-        ORDER BY sc.projectid, sc.keyword, sc.date DESC
-      ),
-      latest_nlp AS (
-        SELECT DISTINCT ON (n.projectid, n.keyword)
-          n.projectid, n.keyword,
-          n.search_intent, n.branded_status, n.action_hint, n.priority_level
-        FROM nlp_keyword_enrichment n
-        ORDER BY n.projectid, n.keyword, n.date DESC
-      )
-      SELECT
-        k.id,
-        k.projectid AS "projectId",
-        k.keyword,
-        COALESCE(lg.position,     k.position, 0)      AS position,
-        -- Quand optimization_start_date est défini, le baseline remplace le
-        -- prev (semaine glissante) pour position/ctr. Sinon comportement actuel.
-        COALESCE(ob.baseline_position, pg.prev_position, k.prev_position, 0) AS prev_position,
-        COALESCE(lg.ctr,          k.ctr, 0)           AS ctr,
-        COALESCE(ob.baseline_ctr, pg.prev_ctr, k.prev_ctr, 0) AS prev_ctr,
-        COALESCE(lg.impressions,  k.impressions, 0)   AS impressions,
-        COALESCE(lg.clicks, 0)                        AS clicks,
-        -- Baselines exposés uniquement quand la date manuelle est définie
-        ob.baseline_date,
-        ob.baseline_position,
-        ob.baseline_ctr,
-        ob.baseline_impressions,
-        ob.baseline_clicks,
-        k.optimization_start_date,
-        COALESCE(sc.opportunity_score, 0)             AS opportunity_score,
-        COALESCE(sc.ctr_gap, 0)                       AS ctr_gap,
-        COALESCE(sc.performance_drift, 0)             AS performance_drift,
-        COALESCE(ln.search_intent, 'informationnelle') AS search_intent,
-        COALESCE(ln.branded_status, 'non-branded')    AS branded_status,
-        ln.action_hint,
-        ln.priority_level,
-        k.is_tracked
-      FROM keywords k
-      JOIN projects p ON p.id = k.projectid
-      LEFT JOIN latest_gsc           lg ON lg.projectid = k.projectid AND lg.keyword = k.keyword
-      LEFT JOIN prev_gsc             pg ON pg.projectid = k.projectid AND pg.keyword = k.keyword
-      LEFT JOIN optimization_baseline ob ON ob.projectid = k.projectid AND ob.keyword = k.keyword
-      LEFT JOIN latest_scores        sc ON sc.projectid = k.projectid AND sc.keyword = k.keyword
-      LEFT JOIN latest_nlp           ln ON ln.projectid = k.projectid AND ln.keyword = k.keyword
-      WHERE k.is_tracked = TRUE
-        AND p.userid = $1
-        AND ($2::int IS NULL OR k.projectid = $2)
-      ORDER BY COALESCE(sc.opportunity_score, 0) DESC
-      `,
-      [req.user.id, projectId || null]
+    const result = await queryTrackedKeywords(
+      req.user.id,
+      projectId ? Number(projectId) : null,
+      null
     );
-
     res.json(result.rows);
   } catch (err) {
     console.error("Fetch tracked keywords error:", err);
@@ -3239,10 +3268,10 @@ app.patch("/api/keywords/:keywordId/optimization-start-date", authenticate, asyn
     if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({ error: "date doit être au format YYYY-MM-DD ou null" });
     }
-    const today = new Date().toISOString().slice(0, 10);
-    if (date > today) {
-      return res.status(400).json({ error: "La date d'optimisation ne peut pas être dans le futur" });
-    }
+    // Pas de restriction de date future : l'analyste peut saisir la date du
+    // jour ou une date à venir. Si aucune ligne gsc_daily ≥ cette date n'existe
+    // encore, has_sufficient_history sera false et l'UI affichera un message
+    // "comparaison sous 1-2 jours" jusqu'à l'arrivée des données.
   }
 
   try {
@@ -3259,10 +3288,106 @@ app.patch("/api/keywords/:keywordId/optimization-start-date", authenticate, asyn
       "UPDATE keywords SET optimization_start_date = $1 WHERE id = $2",
       [date || null, keywordId]
     );
-    res.json({ success: true, optimization_start_date: date || null });
+
+    // Recompute the row from gsc_daily history and return it directly. Le
+    // frontend remplace la ligne dans son state sans avoir à refetch toute
+    // la liste — l'évolution avant/après est visible immédiatement.
+    const recomputed = await queryTrackedKeywords(
+      req.user.id,
+      null,
+      Number(keywordId)
+    );
+    const row = recomputed.rows[0] ?? null;
+
+    res.json({
+      success: true,
+      optimization_start_date: date || null,
+      row,
+    });
   } catch (err) {
     console.error("Set optimization_start_date error:", err);
     res.status(500).json({ error: "Failed to set optimization start date" });
+  }
+});
+
+// Refresh ciblé GSC pour UN mot-clé suivi (sans relancer la collecte globale).
+// Déclenche le workflow n8n "refresh-gsc-keyword" qui interroge GSC pour ce
+// mot-clé uniquement, puis ingère les rows dans gsc_daily via /api/ingest/gsc.
+// Une fois le webhook terminé, on relit les valeurs fraîches via
+// queryTrackedKeywords pour renvoyer le row recomputé au frontend.
+app.post("/api/keywords/:keywordId/refresh-gsc", authenticate, async (req: any, res) => {
+  const { keywordId } = req.params;
+  const days = Number(req.body?.days) > 0 ? Number(req.body.days) : 14;
+
+  try {
+    // 1. Ownership + lecture des paramètres à transmettre à n8n
+    const lookup = await pool.query(
+      `SELECT k.id, k.projectid AS "projectId", k.keyword, p.domain
+         FROM keywords k
+         JOIN projects p ON p.id = k.projectid
+        WHERE k.id = $1 AND p.userid = $2`,
+      [keywordId, req.user.id]
+    );
+    if (lookup.rows.length === 0) {
+      return res.status(404).json({ error: "Keyword not found" });
+    }
+    const { projectId, keyword, domain } = lookup.rows[0];
+
+    // 2. Appel synchrone du webhook n8n (Respond to Webhook côté workflow).
+    //    On privilégie la variable dédiée N8N_REFRESH_GSC_WEBHOOK_URL (même
+    //    pattern que N8N_RESET_WEBHOOK_URL) pour pouvoir cibler une URL
+    //    précise. Fallback : construction depuis N8N_BASE_URL.
+    const webhookUrl =
+      process.env.N8N_REFRESH_GSC_WEBHOOK_URL ||
+      `${process.env.N8N_BASE_URL || "https://n8n.srv770401.hstgr.cloud"}/webhook/refresh-gsc-keyword`;
+
+    let n8nResp: Response;
+    try {
+      n8nResp = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, domain, keyword, days }),
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (err: any) {
+      console.error("n8n refresh-gsc-keyword network error:", err);
+      return res.status(502).json({
+        error:
+          "Impossible de contacter n8n. Vérifie que le workflow refresh-gsc-keyword est ACTIF et que N8N_BASE_URL est correct.",
+      });
+    }
+
+    const responseText = await n8nResp.text();
+    if (!n8nResp.ok) {
+      console.error(`n8n refresh-gsc-keyword HTTP ${n8nResp.status}:`, responseText);
+      const userMessage =
+        n8nResp.status === 404
+          ? "Workflow refresh-gsc-keyword introuvable. Vérifie qu'il est ACTIF (toggle vert) et que le path du Webhook est exactement \"refresh-gsc-keyword\"."
+          : `n8n a retourné une erreur (HTTP ${n8nResp.status}).`;
+      return res.status(502).json({
+        error: userMessage,
+        details: responseText.slice(0, 500),
+      });
+    }
+
+    let n8nPayload: any = {};
+    try { n8nPayload = JSON.parse(responseText); } catch { /* réponse non-JSON acceptée */ }
+
+    // 3. n8n a terminé → gsc_daily est à jour pour ce mot-clé.
+    //    On relit immédiatement via le helper partagé pour récupérer
+    //    position_evolution / impressions_evolution / has_sufficient_history
+    //    recalculés depuis la baseline d'optimisation.
+    const recomputed = await queryTrackedKeywords(
+      req.user.id,
+      null,
+      Number(keywordId)
+    );
+    const row = recomputed.rows[0] ?? null;
+
+    res.json({ success: true, row, n8n: n8nPayload });
+  } catch (err: any) {
+    console.error("Refresh GSC keyword error:", err);
+    res.status(500).json({ error: err?.message || "Refresh GSC failed" });
   }
 });
 

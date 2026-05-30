@@ -10,8 +10,8 @@ type Mode = "login" | "signup" | "forgot";
 
 export default function Login({ onLogin }: LoginProps) {
   const [mode, setMode] = useState<Mode>("login");
-  const [email, setEmail] = useState("admin@example.com");
-  const [password, setPassword] = useState("password123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [avatar, setAvatar] = useState<string | null>(null); // data URL
