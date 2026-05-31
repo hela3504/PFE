@@ -3531,6 +3531,14 @@ app.post("/api/opportunities/reset", authenticate, async (req: any, res) => {
   const N8N_BASE_URL = process.env.N8N_BASE_URL || "https://n8n.srv770401.hstgr.cloud";
   const webhookUrl = `${N8N_BASE_URL}/webhook/reset-collecte`;
 
+  // projectId obligatoire : on doit lire le domaine pour construire siteUrl côté n8n.
+  const rawProjectId = req.body?.projectId;
+  const projectId = Number(rawProjectId);
+  if (!rawProjectId || !Number.isFinite(projectId) || !Number.isInteger(projectId) || projectId <= 0) {
+    return res.status(400).json({ error: "projectId est requis (sélectionnez un projet)." });
+  }
+  console.log(`[reset] projectId reçu: ${projectId}`);
+
   // Date-range filter from the Opportunities page. Forwarded to n8n so the
   // GSC node can pick the right window. Spec:
   //   dateRange:  "last7Days" | "last28Days" | "last3Months" | "last12Months" | "custom"
@@ -3580,6 +3588,26 @@ app.post("/api/opportunities/reset", authenticate, async (req: any, res) => {
   }
 
   try {
+    // Vérifie l'appartenance + lit le domaine du projet sélectionné.
+    const projRes = await pool.query(
+      "SELECT id, name, domain FROM projects WHERE id = $1 AND userid = $2",
+      [projectId, req.user.id]
+    );
+    if (projRes.rowCount === 0) {
+      return res.status(404).json({ error: "Projet introuvable ou non autorisé." });
+    }
+    const project = projRes.rows[0];
+    console.log(`[reset] projet trouvé: name=${project.name} domain=${project.domain}`);
+
+    const cleanedDomain = cleanProjectDomain(project.domain);
+    if (!cleanedDomain) {
+      return res.status(400).json({
+        error: "Ce projet n'a pas de domaine renseigné. Complétez-le dans la page Projets.",
+      });
+    }
+    const siteUrl = `https://www.${cleanedDomain}/`;
+    console.log(`[reset] siteUrl généré: ${siteUrl}`);
+
     // n8n's GSC node expects the human label ("Last 7 Days", "Last 3 Months", …),
     // not our symbolic value. We forward both so the workflow can pick whichever.
     const N8N_DATE_RANGE_LABEL: Record<string, string> = {
@@ -3596,7 +3624,9 @@ app.post("/api/opportunities/reset", authenticate, async (req: any, res) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         triggeredBy: req.user?.email || "unknown",
-        projectId: req.body?.projectId || null,
+        projectId,
+        projectName: project.name,
+        siteUrl,
         dateRange,
         dateRangeLabel,
         startDate: dateRange === "custom" ? startDate : null,
@@ -3607,6 +3637,7 @@ app.post("/api/opportunities/reset", authenticate, async (req: any, res) => {
     });
 
     const responseText = await n8nResponse.text();
+    console.log(`[reset] réponse n8n: status=${n8nResponse.status}, body=${responseText.slice(0, 300)}`);
 
     if (!n8nResponse.ok) {
       console.error("n8n reset-collecte error:", n8nResponse.status, responseText);
