@@ -50,8 +50,8 @@ const expectedCtrFor = (pos: number) => {
 
 // Backend renvoie "Branded"/"Non-branded" (case SQL en dur) — on traduit côté front.
 const BRAND_LABEL: Record<string, string> = {
-  "Branded":     "De marque",
-  "Non-branded": "Générique",
+  "Branded":     "Marque",
+  "Non-branded": "Hors marque",
 };
 
 // Strategic SERP buckets — labels + colors used by the position distribution chart

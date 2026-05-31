@@ -95,6 +95,57 @@ const INTENT_STYLES: Record<string, { label: string; cls: string }> = {
 const getIntentStyle = (intent?: string) =>
   INTENT_STYLES[intent?.toLowerCase() ?? ""] ?? { label: "N/A", cls: "bg-slate-100 text-slate-400" };
 
+// Traductions FR pour les énumérations renvoyées par le backend (qualification).
+const PRIORITY_FR: Record<string, string> = {
+  high: "Haute",
+  medium: "Moyenne",
+  low: "Faible",
+};
+const BRANDED_FR: Record<string, string> = {
+  branded: "Marque",
+  non_branded: "Hors marque",
+  "non-branded": "Hors marque",
+};
+const STABILITY_FR: Record<string, string> = {
+  stable: "Stable",
+  opportunity: "Opportunité",
+};
+const TAIL_FR: Record<string, string> = {
+  long_tail: "Longue traîne",
+  generic: "Générique",
+};
+const INTENT_FR: Record<string, string> = {
+  transactionnelle: "Transactionnelle",
+  navigationnelle: "Navigationnelle",
+  informationnelle: "Informationnelle",
+};
+const KPI_KEY_FR: Record<string, string> = {
+  search_intent: "Intention",
+  branded: "Marque",
+  tail: "Traîne",
+  intent: "Intention",
+};
+const trFR = (map: Record<string, string>, v?: string) =>
+  v ? map[v.toLowerCase().trim()] ?? v.replace(/_/g, " ") : "";
+
+// Traduit les chaînes d'interprétation KPI produites par le backend
+// (ex: "Intent: informationnelle (LLM)", "Branded: branded", "Type: generic (3 mots)").
+const translateKpiValue = (raw: string): string => {
+  if (!raw) return raw;
+  let s = raw;
+  s = s.replace(/^Intent:\s*/i, "Intention : ");
+  s = s.replace(/^Branded:\s*/i, "Marque : ");
+  s = s.replace(/^Type:\s*/i, "Type : ");
+  s = s.replace(/\bbranded\b/gi, "marque");
+  s = s.replace(/\bnon[_-]branded\b/gi, "hors marque");
+  s = s.replace(/\blong_tail\b/gi, "longue traîne");
+  s = s.replace(/\bgeneric\b/gi, "générique");
+  s = s.replace(/\(rules\)/gi, "(règles)");
+  s = s.replace(/\(LLM\)/g, "(IA)");
+  s = s.replace(/\(cache\)/gi, "(cache)");
+  return s;
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Opportunities() {
@@ -359,6 +410,12 @@ export default function Opportunities() {
     setResetError(null);
     setResetSuccess(false);
 
+    if (!selectedProjectId) {
+      setResetError("Sélectionnez un projet avant de relancer la collecte.");
+      setTimeout(() => setResetError(null), 5000);
+      return;
+    }
+
     if (effectiveRange === "custom" && !customDatesValid) {
       setResetError("Sélectionnez une date de début et de fin valides (fin ≥ début, fin ≤ aujourd'hui).");
       setTimeout(() => setResetError(null), 5000);
@@ -482,8 +539,12 @@ export default function Opportunities() {
           <div className="flex flex-col items-end gap-1">
             <button
               onClick={() => handleTriggerWorkflow()}
-              disabled={resetting || (dateRange === "custom" && !customDatesValid)}
-              title="Relance le workflow n8n avec la période sélectionnée"
+              disabled={resetting || !selectedProjectId || (dateRange === "custom" && !customDatesValid)}
+              title={
+                !selectedProjectId
+                  ? "Sélectionnez un projet pour relancer la collecte"
+                  : "Relance le workflow n8n avec la période sélectionnée"
+              }
               className="inline-flex items-center gap-2 px-4 py-2 bg-slate-800 text-white text-sm font-bold rounded-xl hover:bg-slate-900 transition-all disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <RefreshCw className={`w-4 h-4 ${resetting ? "animate-spin" : ""}`} />
@@ -598,12 +659,16 @@ export default function Opportunities() {
                   const next = e.target.value as DateRange;
                   setDateRange(next);
                   // Auto-trigger n8n on preset change (spec). Custom is staged only.
-                  if (next !== "custom") {
+                  if (next !== "custom" && selectedProjectId) {
                     handleTriggerWorkflow(next);
                   }
                 }}
-                disabled={resetting}
-                title="Période envoyée au workflow n8n pour interroger GSC"
+                disabled={resetting || !selectedProjectId}
+                title={
+                  !selectedProjectId
+                    ? "Sélectionnez un projet pour relancer la collecte"
+                    : "Période envoyée au workflow n8n pour interroger GSC"
+                }
                 className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 text-slate-700 disabled:opacity-60"
               >
                 <option value="last7Days">7 derniers jours</option>
@@ -621,12 +686,16 @@ export default function Opportunities() {
                   setRowLimit(next);
                   localStorage.setItem("opp_row_limit", String(next));
                   // Auto-trigger n8n sauf en mode custom (qui attend "Appliquer")
-                  if (dateRange !== "custom") {
+                  if (dateRange !== "custom" && selectedProjectId) {
                     handleTriggerWorkflow(undefined, next);
                   }
                 }}
-                disabled={resetting}
-                title="Nombre maximum de mots-clés à récupérer depuis Google Search Console"
+                disabled={resetting || !selectedProjectId}
+                title={
+                  !selectedProjectId
+                    ? "Sélectionnez un projet pour relancer la collecte"
+                    : "Nombre maximum de mots-clés à récupérer depuis Google Search Console"
+                }
                 className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-indigo-500 text-slate-700 disabled:opacity-60"
               >
                 {ROW_LIMIT_OPTIONS.map((n) => (
@@ -681,7 +750,8 @@ export default function Opportunities() {
                 </div>
                 <button
                   onClick={() => handleTriggerWorkflow()}
-                  disabled={!customDatesValid || resetting}
+                  disabled={!customDatesValid || resetting || !selectedProjectId}
+                  title={!selectedProjectId ? "Sélectionnez un projet pour relancer la collecte" : undefined}
                   className="inline-flex items-center gap-2 px-5 py-2 bg-indigo-600 text-white text-sm font-bold rounded-xl hover:bg-indigo-700 shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed h-[38px]"
                 >
                   {resetting ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
@@ -818,11 +888,11 @@ export default function Opportunities() {
                         <td className="px-6 py-4">
                           {isBrandedKeyword(k.branded_status) ? (
                             <span className="px-2 py-1 rounded-lg text-[11px] font-bold bg-indigo-100 text-indigo-700">
-                              De marque
+                              Marque
                             </span>
                           ) : (
                             <span className="px-2 py-1 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-500">
-                              Générique
+                              Hors marque
                             </span>
                           )}
                         </td>
@@ -966,7 +1036,7 @@ export default function Opportunities() {
                       <div className="flex flex-col items-end gap-2">
                         <div className="bg-white/20 px-4 py-1 rounded-xl backdrop-blur-md border border-white/30">
                           <span className="text-xs font-bold uppercase">
-                            {qualificationResult.search_intent}
+                            {trFR(INTENT_FR, qualificationResult.search_intent)}
                           </span>
                         </div>
                         <div
@@ -978,7 +1048,7 @@ export default function Opportunities() {
                               : "bg-emerald-500/40"
                           }`}
                         >
-                          Priorité : {qualificationResult.priority_level}
+                          Priorité : {trFR(PRIORITY_FR, qualificationResult.priority_level)}
                         </div>
                       </div>
                     </div>
@@ -1012,12 +1082,12 @@ export default function Opportunities() {
                           <div className={`text-[10px] uppercase font-bold tracking-wider ${
                             selectedKeyword.your_in_aio ? "text-emerald-600" : "text-amber-600"
                           }`}>
-                            AI Overview
+                            Aperçu IA
                           </div>
                           <div className="text-sm font-bold text-slate-900">
                             {selectedKeyword.your_in_aio
-                              ? "Votre domaine est cité dans l'AI Overview ✓"
-                              : "AI Overview présent — votre domaine n'est PAS cité"}
+                              ? "Votre domaine est cité dans l'Aperçu IA ✓"
+                              : "Aperçu IA présent — votre domaine n'est PAS cité"}
                           </div>
                           {!selectedKeyword.your_in_aio && (
                             <div className="text-xs text-amber-700 mt-1">
@@ -1034,17 +1104,17 @@ export default function Opportunities() {
                         {
                           icon: ShieldCheck,
                           label: "Marque",
-                          value: qualificationResult.branded_status?.replace(/_/g, " "),
+                          value: trFR(BRANDED_FR, qualificationResult.branded_status),
                         },
                         {
                           icon: Activity,
                           label: "Stabilité",
-                          value: qualificationResult.stability_status,
+                          value: trFR(STABILITY_FR, qualificationResult.stability_status),
                         },
                         {
                           icon: Zap,
                           label: "Type de Traîne",
-                          value: qualificationResult.tail_type?.replace(/_/g, " "),
+                          value: trFR(TAIL_FR, qualificationResult.tail_type),
                         },
                         {
                           icon: AlertCircle,
@@ -1084,10 +1154,10 @@ export default function Opportunities() {
                                 className="flex items-start gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100"
                               >
                                 <div className="text-[10px] font-bold text-slate-400 uppercase w-32 shrink-0 mt-1">
-                                  {key.replace(/_/g, " ")}
+                                  {KPI_KEY_FR[key.toLowerCase()] ?? key.replace(/_/g, " ")}
                                 </div>
                                 <div className="text-xs text-slate-600 leading-relaxed">
-                                  {value as string}
+                                  {translateKpiValue(String(value))}
                                 </div>
                               </div>
                             )
