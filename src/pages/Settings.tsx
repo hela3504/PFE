@@ -691,12 +691,12 @@ export default function Settings() {
                   Aucun utilisateur.
                 </div>
               ) : (
-                <div className="border border-slate-100 rounded-2xl overflow-x-auto">
-                  <table className="w-full text-left">
+                <div className="border border-slate-100 rounded-2xl">
+                  <table className="w-full text-left table-fixed">
                     <thead className="bg-slate-50">
                       <tr className="text-[10px] uppercase tracking-wider font-bold text-slate-500">
-                        <th className="px-5 py-3">Email</th>
-                        <th className="px-5 py-3 text-right whitespace-nowrap">Actions</th>
+                        <th className="px-3 py-3 w-[78%]">Email</th>
+                        <th className="px-3 py-3 w-[22%] text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -704,8 +704,8 @@ export default function Settings() {
                         const isMe = u.id === currentUserId;
                         return (
                           <tr key={u.id} className="hover:bg-slate-50/50 transition-colors">
-                            <td className="px-5 py-3">
-                              <div className="flex items-center gap-3 min-w-0">
+                            <td className="px-3 py-3">
+                              <div className="flex items-center gap-2 min-w-0">
                                 <div className="w-8 h-8 rounded-lg overflow-hidden bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold text-sm shrink-0">
                                   {u.avatar_url ? (
                                     <img src={u.avatar_url} alt={u.email} className="w-full h-full object-cover" />
@@ -713,42 +713,42 @@ export default function Settings() {
                                     u.email[0]?.toUpperCase()
                                   )}
                                 </div>
-                                <div className="font-medium text-slate-800 truncate min-w-0">{u.email}</div>
+                                <div className="font-medium text-slate-800 truncate min-w-0" title={u.email}>
+                                  {u.email}
+                                </div>
                                 {u.is_admin && (
                                   <span
                                     title="Administrateur"
-                                    className="shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200"
+                                    className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200"
                                   >
-                                    👑 Admin
+                                    👑
                                   </span>
                                 )}
                                 {isMe && (
-                                  <span className="shrink-0 px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-100">
+                                  <span className="shrink-0 px-1.5 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-100">
                                     Vous
                                   </span>
                                 )}
                               </div>
                             </td>
-                            <td className="px-5 py-3 text-right whitespace-nowrap">
-                              <div className="inline-flex items-center gap-2">
+                            <td className="px-3 py-3 text-right">
+                              <div className="inline-flex items-center gap-1 justify-end">
                                 <button
                                   onClick={() => openEditUser(u)}
                                   title="Modifier l'utilisateur"
-                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-100 hover:bg-indigo-100 transition-all"
+                                  className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-100 hover:bg-indigo-100 transition-all"
                                 >
                                   <Edit2 className="w-3.5 h-3.5" />
-                                  Modifier
                                 </button>
                                 <button
                                   onClick={() => handleUserDelete(u)}
                                   disabled={isMe || deletingId === u.id}
                                   title={isMe ? "Vous ne pouvez pas supprimer votre propre compte" : "Supprimer cet utilisateur"}
-                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-red-50 text-red-700 border border-red-100 hover:bg-red-100 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-red-50"
+                                  className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-red-50 text-red-700 border border-red-100 hover:bg-red-100 transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-red-50"
                                 >
                                   {deletingId === u.id
                                     ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                                     : <Trash2 className="w-3.5 h-3.5" />}
-                                  Supprimer
                                 </button>
                               </div>
                             </td>

@@ -61,7 +61,15 @@
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(npx --yes tsc --noEmit swagger-docs.ts)",
-      "Bash(PORT=3001 npx tsx *)"
+      "Bash(PORT=3001 npx tsx *)",
+      "Bash(git push *)",
+      "Bash(pandoc --version)",
+      "Bash(grep -c \"^\\\\\\\\\\\\\\\\section\" latex/chapters/chapter1.tex)",
+      "Bash(grep -c \"^\\\\\\\\\\\\\\\\subsection\" latex/chapters/chapter1.tex)",
+      "Bash(grep -c \"\\\\\\\\\\\\\\\\begin{table}\" latex/chapters/chapter1.tex)",
+      "Bash(awk '/^\\\\\\\\section/{s++} /^\\\\\\\\subsection/{ss++} /includegraphics/{i++} /^\\\\\\\\begin\\\\{table\\\\}/{t++} END{print \"sections:\",s+0; print \"subsections:\",ss+0; print \"images:\",i+0; print \"tables:\",t+0}' latex/chapters/chapter1.tex)",
+      "Bash(xargs echo \"total lines:\")",
+      "Bash(awk '{print $NF}')"
     ]
   }
 }
