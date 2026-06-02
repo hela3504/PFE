@@ -777,6 +777,49 @@
  */
 
 // ──────────────────────────────────────────────────────────────────────────────
+//  NOTIFICATIONS
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/notifications/trigger:
+ *   post:
+ *     summary: Déclenche manuellement le job de notifications (admin uniquement)
+ *     description: |
+ *       Parcourt tous les utilisateurs, lit leurs préférences `users.settings.notifications`
+ *       et envoie un courriel par type d'alerte activé :
+ *         - `positionDrop` : mots-clés suivis dont la dérive de position dépasse le seuil
+ *           `settings.thresholds.drift` (défaut 3).
+ *         - `upcomingEvents` : événements du calendrier programmés dans les 3 prochains jours.
+ *       La table `notifications_sent` assure la déduplication sur 7 jours glissants.
+ *       Si SMTP_HOST n'est pas configuré, les courriels sont seulement journalisés.
+ *     tags: [Settings]
+ *     security: [{ bearerAuth: [] }]
+ *     responses:
+ *       200:
+ *         description: Job exécuté avec succès
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 notified: { type: integer, description: "Nombre d'utilisateurs ayant reçu au moins un courriel" }
+ *                 results:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       userId: { type: integer }
+ *                       email: { type: string }
+ *                       positionDrops: { type: integer }
+ *                       upcomingEvents: { type: integer }
+ *       401: { description: Token manquant ou invalide }
+ *       403: { description: Réservé aux administrateurs }
+ *       500: { description: Erreur lors de l'exécution du job }
+ */
+
+// ──────────────────────────────────────────────────────────────────────────────
 //  HEALTH
 // ──────────────────────────────────────────────────────────────────────────────
 

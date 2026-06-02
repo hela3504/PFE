@@ -11,6 +11,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import crypto from "crypto";
 import nodemailer from "nodemailer";
+import cron from "node-cron";
 import swaggerJsdoc from "swagger-jsdoc";
 import swaggerUi from "swagger-ui-express";
 
@@ -326,6 +327,21 @@ async function initDb() {
       );
       CREATE INDEX IF NOT EXISTS password_resets_user_id_idx ON password_resets(user_id);
       CREATE INDEX IF NOT EXISTS password_resets_expires_at_idx ON password_resets(expires_at);
+    `);
+
+    // Notifications déjà envoyées — dédup pour éviter de renvoyer le même
+    // courriel quotidiennement. ref_key = "projectid:keyword" (positionDrop) ou
+    // "event:id" (upcomingEvents). Fenêtre de re-notification : 7 jours.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS notifications_sent (
+        id        SERIAL PRIMARY KEY,
+        user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        type      TEXT NOT NULL,
+        ref_key   TEXT NOT NULL,
+        sent_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS notifications_sent_user_type_idx
+        ON notifications_sent (user_id, type, sent_at DESC);
     `);
 
     // Schema drift cleanup — drop columns/table added externally and now dead.
@@ -752,6 +768,229 @@ Si vous n'êtes pas à l'origine de cette demande, ignorez cet email — votre m
     console.log(`[forgot-password] SMTP not configured. Reset link for ${to}:\n  ${link}`);
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Notifications quotidiennes (chute de position, événements à venir)
+// Préférences stockées dans users.settings.notifications + users.settings.thresholds.
+// Dédup via la table notifications_sent (fenêtre de 7 jours par défaut).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const NOTIF_DEDUP_DAYS = 7;
+const UPCOMING_EVENT_DAYS = 3;
+const NOTIF_DEFAULT_DRIFT_THRESHOLD = 3;
+
+async function wasNotifiedRecently(userId: number, type: string, refKey: string): Promise<boolean> {
+  const r = await pool.query(
+    `SELECT 1 FROM notifications_sent
+     WHERE user_id = $1 AND type = $2 AND ref_key = $3
+       AND sent_at >= NOW() - ($4 || ' days')::interval
+     LIMIT 1`,
+    [userId, type, refKey, String(NOTIF_DEDUP_DAYS)]
+  );
+  return r.rowCount! > 0;
+}
+
+async function recordNotification(userId: number, type: string, refKey: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO notifications_sent (user_id, type, ref_key) VALUES ($1, $2, $3)`,
+    [userId, type, refKey]
+  );
+}
+
+async function sendNotificationEmail(to: string, subject: string, html: string, text: string): Promise<void> {
+  if (mailer) {
+    await mailer.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER || "noreply@localhost",
+      to,
+      subject,
+      text,
+      html,
+    });
+    console.log(`[notifications] email sent to ${to} — ${subject}`);
+  } else {
+    console.log(`[notifications] SMTP not configured. Would have sent to ${to}: ${subject}`);
+  }
+}
+
+type PositionDropRow = { projectid: number; project_name: string; keyword: string; performance_drift: number; position: number };
+type UpcomingEventRow = { id: number; project_name: string; title: string; start_date: string };
+
+async function checkPositionDrops(user: { id: number; email: string }, driftThreshold: number): Promise<number> {
+  const r = await pool.query(
+    `SELECT s.projectid, p.name AS project_name, s.keyword,
+            s.performance_drift, k.position
+     FROM scores_daily s
+     JOIN projects p ON p.id = s.projectid AND p.userid = $1
+     JOIN keywords k ON k.projectid = s.projectid
+                    AND LOWER(k.keyword) = LOWER(s.keyword)
+                    AND k.is_tracked = TRUE
+     WHERE s.performance_drift >= $2
+       AND s.date::date >= (CURRENT_DATE - interval '2 days')
+     ORDER BY s.performance_drift DESC`,
+    [user.id, driftThreshold]
+  );
+
+  const drops: PositionDropRow[] = [];
+  for (const row of r.rows) {
+    const refKey = `${row.projectid}:${row.keyword}`;
+    if (await wasNotifiedRecently(user.id, "positionDrop", refKey)) continue;
+    drops.push(row);
+  }
+  if (drops.length === 0) return 0;
+
+  const subject = `[SEO BI] ${drops.length} chute${drops.length > 1 ? "s" : ""} de position détectée${drops.length > 1 ? "s" : ""}`;
+  const rowsHtml = drops.map((d) =>
+    `<tr>
+       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0"><strong>${d.keyword}</strong></td>
+       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#475569">${d.project_name}</td>
+       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#dc2626;font-weight:700">+${Number(d.performance_drift).toFixed(1)}</td>
+     </tr>`
+  ).join("");
+  const html = `<!doctype html><html><body style="font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;padding:32px;color:#0f172a">
+    <div style="max-width:640px;margin:0 auto;background:#fff;border-radius:24px;padding:40px;border:1px solid #e2e8f0">
+      <h1 style="margin:0 0 8px;font-size:22px;color:#dc2626">Alerte chute de position</h1>
+      <p style="color:#475569;line-height:1.6;margin:16px 0">
+        ${drops.length} mot${drops.length > 1 ? "s" : ""}-clé${drops.length > 1 ? "s suivis" : " suivi"} présente${drops.length > 1 ? "nt" : ""}
+        une dérive de position supérieure ou égale au seuil défini (${driftThreshold}).
+      </p>
+      <table style="width:100%;border-collapse:collapse;margin-top:16px;font-size:14px">
+        <thead><tr style="background:#f1f5f9;text-align:left">
+          <th style="padding:8px 12px">Mot-clé</th><th style="padding:8px 12px">Projet</th><th style="padding:8px 12px;text-align:right">Dérive</th>
+        </tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      <p style="color:#64748b;font-size:13px;margin-top:24px">
+        Connectez-vous à <a href="${APP_URL}" style="color:#2563eb">SEO BI</a> pour examiner ces mots-clés.
+      </p>
+    </div></body></html>`;
+  const text = `Alerte chute de position (seuil: ${driftThreshold})\n\n` +
+    drops.map((d) => `- ${d.keyword} (${d.project_name}) : +${Number(d.performance_drift).toFixed(1)}`).join("\n") +
+    `\n\nConnectez-vous à ${APP_URL}`;
+
+  await sendNotificationEmail(user.email, subject, html, text);
+  for (const d of drops) {
+    await recordNotification(user.id, "positionDrop", `${d.projectid}:${d.keyword}`);
+  }
+  return drops.length;
+}
+
+async function checkUpcomingEvents(user: { id: number; email: string }): Promise<number> {
+  const r = await pool.query(
+    `SELECT e.id, p.name AS project_name, e.title, e.start_date
+     FROM events e
+     JOIN projects p ON p.id = e.projectid AND p.userid = $1
+     WHERE e.start_date >= NOW()
+       AND e.start_date <= NOW() + ($2 || ' days')::interval
+     ORDER BY e.start_date ASC`,
+    [user.id, String(UPCOMING_EVENT_DAYS)]
+  );
+
+  const upcoming: UpcomingEventRow[] = [];
+  for (const row of r.rows) {
+    if (await wasNotifiedRecently(user.id, "upcomingEvents", `event:${row.id}`)) continue;
+    upcoming.push(row);
+  }
+  if (upcoming.length === 0) return 0;
+
+  const subject = `[SEO BI] ${upcoming.length} événement${upcoming.length > 1 ? "s" : ""} à venir`;
+  const rowsHtml = upcoming.map((e) => {
+    const d = new Date(e.start_date).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short" });
+    return `<tr>
+       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0"><strong>${e.title}</strong></td>
+       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#475569">${e.project_name}</td>
+       <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#0f172a">${d}</td>
+     </tr>`;
+  }).join("");
+  const html = `<!doctype html><html><body style="font-family:system-ui,-apple-system,sans-serif;background:#f8fafc;padding:32px;color:#0f172a">
+    <div style="max-width:640px;margin:0 auto;background:#fff;border-radius:24px;padding:40px;border:1px solid #e2e8f0">
+      <h1 style="margin:0 0 8px;font-size:22px;color:#1d4ed8">Événements à venir</h1>
+      <p style="color:#475569;line-height:1.6;margin:16px 0">
+        ${upcoming.length} événement${upcoming.length > 1 ? "s sont" : " est"} programmé${upcoming.length > 1 ? "s" : ""}
+        dans les ${UPCOMING_EVENT_DAYS} prochains jours.
+      </p>
+      <table style="width:100%;border-collapse:collapse;margin-top:16px;font-size:14px">
+        <thead><tr style="background:#f1f5f9;text-align:left">
+          <th style="padding:8px 12px">Titre</th><th style="padding:8px 12px">Projet</th><th style="padding:8px 12px">Date</th>
+        </tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+      <p style="color:#64748b;font-size:13px;margin-top:24px">
+        Consultez votre calendrier sur <a href="${APP_URL}" style="color:#2563eb">SEO BI</a>.
+      </p>
+    </div></body></html>`;
+  const text = `Événements à venir (${UPCOMING_EVENT_DAYS} jours)\n\n` +
+    upcoming.map((e) => `- ${e.title} (${e.project_name}) : ${new Date(e.start_date).toLocaleString("fr-FR")}`).join("\n");
+
+  await sendNotificationEmail(user.email, subject, html, text);
+  for (const e of upcoming) {
+    await recordNotification(user.id, "upcomingEvents", `event:${e.id}`);
+  }
+  return upcoming.length;
+}
+
+type NotifJobResult = { userId: number; email: string; positionDrops: number; upcomingEvents: number };
+
+async function runNotificationsJob(): Promise<NotifJobResult[]> {
+  const users = await pool.query(
+    `SELECT id, email, COALESCE(settings, '{}'::jsonb) AS settings
+     FROM users WHERE email IS NOT NULL`
+  );
+  const results: NotifJobResult[] = [];
+
+  for (const u of users.rows) {
+    const settings = u.settings || {};
+    const notif = settings.notifications || {};
+    const driftThreshold = Number(settings.thresholds?.drift ?? NOTIF_DEFAULT_DRIFT_THRESHOLD);
+
+    let positionDrops = 0;
+    let upcomingEvents = 0;
+    try {
+      if (notif.positionDrop) {
+        positionDrops = await checkPositionDrops({ id: u.id, email: u.email }, driftThreshold);
+      }
+      if (notif.upcomingEvents) {
+        upcomingEvents = await checkUpcomingEvents({ id: u.id, email: u.email });
+      }
+    } catch (err) {
+      console.error(`[notifications] error for user ${u.id} (${u.email}):`, err);
+    }
+
+    if (positionDrops > 0 || upcomingEvents > 0) {
+      results.push({ userId: u.id, email: u.email, positionDrops, upcomingEvents });
+    }
+  }
+  console.log(`[notifications] job done — ${results.length} user(s) notified`);
+  return results;
+}
+
+// Enregistrement du cron au démarrage du serveur.
+// Désactivable via NOTIFICATIONS_ENABLED=false (par défaut: activé).
+// Expression personnalisable via NOTIFICATIONS_CRON (par défaut: tous les jours 8h UTC).
+const NOTIFICATIONS_ENABLED = (process.env.NOTIFICATIONS_ENABLED ?? "true").toLowerCase() !== "false";
+const NOTIFICATIONS_CRON = process.env.NOTIFICATIONS_CRON || "0 8 * * *";
+if (NOTIFICATIONS_ENABLED) {
+  if (cron.validate(NOTIFICATIONS_CRON)) {
+    cron.schedule(NOTIFICATIONS_CRON, () => {
+      runNotificationsJob().catch((err) => console.error("[notifications] cron run failed:", err));
+    }, { timezone: "UTC" });
+    console.log(`[notifications] cron registered: '${NOTIFICATIONS_CRON}' (UTC)`);
+  } else {
+    console.warn(`[notifications] invalid cron expression '${NOTIFICATIONS_CRON}' — cron NOT registered`);
+  }
+} else {
+  console.log("[notifications] disabled via NOTIFICATIONS_ENABLED=false");
+}
+
+// Déclenchement manuel — réservé aux admins, utile pour tester sans attendre le cron.
+app.post("/api/notifications/trigger", authenticate, requireAdmin, async (_req, res) => {
+  try {
+    const results = await runNotificationsJob();
+    res.json({ success: true, notified: results.length, results });
+  } catch (err: any) {
+    console.error("[notifications] manual trigger failed:", err);
+    res.status(500).json({ error: err?.message || "trigger failed" });
+  }
+});
 
 app.post("/api/auth/forgot-password", async (req, res) => {
   const email = (req.body?.email || "").toString().trim().toLowerCase();
