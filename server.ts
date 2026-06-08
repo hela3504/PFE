@@ -1,7 +1,9 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import pkg from "pg";
-const { Pool } = pkg;
+import { Pool as NeonPool, neonConfig } from "@neondatabase/serverless";
+import ws from "ws";
+const { Pool: PgPool } = pkg;
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import path from "path";
@@ -18,12 +20,25 @@ import swaggerUi from "swagger-ui-express";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes("localhost")
-    ? false
-    : { rejectUnauthorized: false },
-});
+// Driver DB : on bascule sur le driver « serverless » de Neon (WebSocket sur
+// le port 443) quand l'URL pointe vers *.neon.tech. C'est nécessaire en prod
+// sur les hébergements mutualisés (PlanetHoster N0C, etc.) qui bloquent le
+// port 5432 sortant. Pour un Postgres local ou non-Neon, on conserve `pg`.
+const isNeonDb = !!process.env.DATABASE_URL?.includes(".neon.tech");
+let pool: any;
+if (isNeonDb) {
+  neonConfig.webSocketConstructor = ws;
+  pool = new NeonPool({ connectionString: process.env.DATABASE_URL });
+  console.log("[db] using @neondatabase/serverless driver (WebSocket/443)");
+} else {
+  pool = new PgPool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DATABASE_URL?.includes("localhost")
+      ? false
+      : { rejectUnauthorized: false },
+  });
+  console.log("[db] using pg driver (TCP/5432)");
+}
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
